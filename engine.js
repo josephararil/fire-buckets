@@ -1,6 +1,6 @@
 // ─── Compass FIRE Planner — Engine (pure math, state shape preserved) ───
 
-const APP_VERSION = "20260529.0";
+const APP_VERSION = "20260529.1";
 
 const GK_CONFIG = {
   IWR: 0.04,
@@ -902,9 +902,9 @@ async function saveState(state) { try { localStorage.setItem(STORAGE_KEY, JSON.s
 
 const GIST_FILENAME = "harari-state.json";
 async function loadFromGist(token, gistId) {
-  const resp = await fetch(`https://api.github.com/gists/${gistId}`, {
-    headers: { Authorization: `Bearer ${token}`, Accept: "application/vnd.github.v3+json" },
-  });
+  const headers = { Accept: "application/vnd.github.v3+json" };
+  if (token) headers.Authorization = `Bearer ${token}`;
+  const resp = await fetch(`https://api.github.com/gists/${gistId}`, { headers });
   if (!resp.ok) throw new Error(`GitHub ${resp.status}: ${resp.statusText}`);
   const data = await resp.json();
   const content = data.files[GIST_FILENAME]?.content;
@@ -912,7 +912,7 @@ async function loadFromGist(token, gistId) {
   return JSON.parse(content);
 }
 async function saveToGist(token, gistId, state) {
-  const OMIT_KEYS = new Set(["cloudToken"]);
+  const OMIT_KEYS = new Set(["cloudToken", "geminiApiKey"]);
   const content = JSON.stringify(state, (k, v) => (k !== "" && OMIT_KEYS.has(k)) ? undefined : v, 2);
   const payload = { description: "Harari FIRE Dashboard State", files: { [GIST_FILENAME]: { content } } };
   if (gistId) {
@@ -1034,6 +1034,58 @@ function simulateAffordability(state, { funDelta = 0, essentialsDelta = 0, oneOf
   }
 
   return { before, after, deltaMonths, oneOffMonths, verdict: { tone, headline, text } };
+
+
+function buildAIContext(state) {
+  const cf = deriveCashflow(state);
+  const portfolio = (state.bucketVWCE || 0) + (state.bucketXEON || 0) + (state.bucketFixedIncome || 0) + (state.bucketCash || 0);
+  const leanTarget       = cf.essentials > 0 ? (cf.essentials * 12) / 0.045 : 0;
+  const aggressiveTarget = cf.annualExpenses / 0.04;
+  const recommendedTarget = cf.annualExpenses / 0.035;
+  const bulletproofTarget = cf.annualExpenses / 0.03;
+  const lastWithdrawal = effectiveLastWithdrawal(state);
+  const wr = portfolio > 0 && lastWithdrawal > 0 ? (lastWithdrawal / portfolio) * 100 : 0;
+  const zone = getGKZone(wr);
+  const phaseLabel = PHASES[state.currentPhase]?.label || state.currentPhase;
+  const outlook = monthlyOutlook(state);
+  const triggers = evaluateTriggers(state);
+
+  const gap = (target) => portfolio >= target ? " ✓ REACHED" : `  — ${fmtEur(target - portfolio)} to go`;
+
+  const lines = [
+    "You are a FIRE planning advisor. The user follows Guyton-Klinger guardrails (4% initial withdrawal rate), lives in Bulgaria (0% capital-gains tax on UCITS ETFs like VWCE/XEON on Xetra), and organizes assets into Growth/Safety/Stability/Cash buckets. Answer concretely using the numbers below, in ≤6 sentences. Do not invent figures.",
+    "",
+    "=== FINANCIAL SNAPSHOT ===",
+    `Portfolio total: ${fmtEur(portfolio)}`,
+    `  Growth (VWCE): ${fmtEur(state.bucketVWCE || 0)}`,
+    `  Safety (XEON): ${fmtEur(state.bucketXEON || 0)}`,
+    `  Stability (Bonds): ${fmtEur(state.bucketFixedIncome || 0)}`,
+    `  Cash: ${fmtEur(state.bucketCash || 0)}`,
+    "",
+    `Phase: ${phaseLabel}`,
+    `Income: ${fmtEur(cf.incomeMonthly)}/mo  (primary ${fmtEur(cf.primarySalary)}/mo, partner ${fmtEur(cf.partnerSalary || 0)}/mo)`,
+    `Expenses: ${fmtEur(cf.totalExpenses)}/mo  (essentials ${fmtEur(cf.essentials)}/mo, fun ${fmtEur(cf.fun || 0)}/mo)`,
+    `Monthly surplus: ${fmtEur(cf.surplusMonthly)}/mo  |  Annual expenses: ${fmtEur(cf.annualExpenses)}/yr`,
+    `Withdrawal rate: ${wr.toFixed(2)}%  |  GK zone: ${zone.label}`,
+    "",
+    "FIRE targets:",
+    `  Lean FIRE      (essentials, 4.5% IWR): ${fmtEur(leanTarget)}${gap(leanTarget)}`,
+    `  Aggressive     (full spend, 4.0% IWR): ${fmtEur(aggressiveTarget)}${gap(aggressiveTarget)}`,
+    `  Recommended    (full spend, 3.5% IWR): ${fmtEur(recommendedTarget)}${gap(recommendedTarget)}`,
+    `  Bulletproof    (full spend, 3.0% IWR): ${fmtEur(bulletproofTarget)}${gap(bulletproofTarget)}`,
+    "",
+    `This month: ${outlook.headline}`,
+  ];
+
+  if (triggers.length > 0) {
+    lines.push("", "Active alerts:");
+    triggers.slice(0, 5).forEach(t => {
+      const action = typeof t.action === "string" ? t.action : t.event;
+      lines.push(`  [${t.urgency}] ${t.event}: ${action}`);
+    });
+  }
+
+  return lines.join("\n");
 }
 
 Object.assign(window, {
@@ -1043,7 +1095,7 @@ Object.assign(window, {
   sampleCorrelatedPaths, sampleReturnPath, sampleInflationPath, gaussianSample,
   deriveCashflow, nextRebalanceBucket, monthlyRecommendation, monthlyOutlook,
   effectiveFloor, effectiveLastWithdrawal,
-  evaluateTriggers, fireTiers, monthsToTarget, realMonthlyRate, simulateAffordability,
+  evaluateTriggers, fireTiers, monthsToTarget, realMonthlyRate, simulateAffordability, buildAIContext,
   loadState, saveState, loadFromGist, saveToGist, GIST_FILENAME,
 });
 

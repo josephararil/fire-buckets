@@ -3,6 +3,7 @@
 // Settings (incl. Cloud sync) lives behind a clear button in the header.
 
 const DEFAULT_GIST_ID = "";
+const GEMINI_MODEL = "gemini-2.5-flash";
 
 const DEFAULT_STATE = {
   // Buckets
@@ -70,6 +71,9 @@ const DEFAULT_STATE = {
 
   // Employment start date for Freedom §1 tracker (ISO yyyy-mm-dd, empty = hidden)
   employmentStartDate: "",
+
+  // AI assistant — never synced to Gist
+  geminiApiKey: "",
 };
 
 function SettingsSheet({ open, onClose, state, setState }) {
@@ -97,12 +101,12 @@ function SettingsSheet({ open, onClose, state, setState }) {
   };
 
   const cloudLoad = async () => {
-    if (!draftToken || !draftGistId) { setSyncStatus({ type: "bad", msg: "Token and Gist ID required" }); return; }
+    if (!draftGistId) { setSyncStatus({ type: "bad", msg: "Gist ID required" }); return; }
     if (!window.confirm("Replace local state with cloud version?")) return;
     setSyncing(true);
     try {
       const data = await loadFromGist(draftToken, draftGistId);
-      setState(s => ({ ...s, ...data, cloudToken: draftToken, cloudGistId: draftGistId }));
+      setState(s => ({ ...s, ...data, cloudToken: draftToken || s.cloudToken, cloudGistId: draftGistId }));
       setSyncStatus({ type: "good", msg: "Loaded from GitHub Gist" });
     } catch (e) { setSyncStatus({ type: "bad", msg: e.message }); }
     setSyncing(false);
@@ -171,6 +175,21 @@ function SettingsSheet({ open, onClose, state, setState }) {
               </div>
             )}
           </Stack>
+        </div>
+
+        <div style={{ borderTop: "1px solid var(--hairline)", paddingTop: 20 }}>
+          <div style={{ fontSize: 13, fontWeight: 600, color: "var(--fg)", marginBottom: 4 }}>AI assistant (optional)</div>
+          <div style={{ fontSize: 12, color: "var(--fg-mute)", lineHeight: 1.5, marginBottom: 14 }}>
+            Stored only on this device. Sent to Google only when you ask a question.
+          </div>
+          <div>
+            <div style={{ fontSize: 11, color: "var(--fg-soft)", marginBottom: 6 }}>Gemini API key</div>
+            <input
+              type="password" value={state.geminiApiKey || ""} onChange={e => updateState("geminiApiKey", e.target.value)}
+              placeholder="AIza…"
+              style={{ width: "100%", padding: "11px 14px", background: "var(--surface-2)", border: "1px solid var(--hairline)", borderRadius: 12, color: "var(--fg)", fontSize: 13, fontFamily: "var(--font-mono)", outline: "none", boxSizing: "border-box" }}
+            />
+          </div>
         </div>
 
         <div style={{ borderTop: "1px solid var(--hairline)", paddingTop: 20 }}>
@@ -305,7 +324,132 @@ function SettingsSheet({ open, onClose, state, setState }) {
   );
 }
 
-function Header({ onSettings, isMobile, currentPhase }) {
+const CHIPS = [
+  "Can we afford €400/mo fun?",
+  "Am I on track?",
+  "What's my biggest risk?",
+  "What should I do this month?",
+];
+
+function AskCompass({ open, onClose, state }) {
+  const [question, setQuestion] = useState("");
+  const [answer, setAnswer] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState(null);
+
+  const hasKey = !!(state.geminiApiKey || "").trim();
+
+  useEffect(() => {
+    if (open) { setQuestion(""); setAnswer(null); setError(null); setLoading(false); }
+  }, [open]);
+
+  const handleSubmit = async () => {
+    if (!hasKey || !question.trim()) return;
+    setLoading(true);
+    setError(null);
+    setAnswer(null);
+    try {
+      const body = {
+        contents: [{ parts: [{ text: buildAIContext(state) + "\n\nQuestion: " + question }] }],
+      };
+      const resp = await fetch(
+        `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${state.geminiApiKey}`,
+        { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }
+      );
+      if (!resp.ok) {
+        const errData = await resp.json().catch(() => ({}));
+        throw new Error(errData?.error?.message || `HTTP ${resp.status}`);
+      }
+      const data = await resp.json();
+      const text = data?.candidates?.[0]?.content?.parts?.[0]?.text;
+      if (!text) throw new Error("No answer returned from Gemini.");
+      setAnswer(text);
+    } catch (e) {
+      setError(e.message || "Something went wrong.");
+    }
+    setLoading(false);
+  };
+
+  return (
+    <Sheet open={open} onClose={onClose} title="Ask Compass" size="md">
+      <Stack gap={20}>
+        {!hasKey ? (
+          <div style={{ padding: "24px 16px", background: "var(--surface-2)", borderRadius: 12, border: "1px dashed var(--hairline-strong)", textAlign: "center" }}>
+            <div style={{ fontSize: 28, marginBottom: 10 }}>✨</div>
+            <div style={{ fontSize: 14, fontWeight: 600, color: "var(--fg)", marginBottom: 6 }}>AI assistant not enabled</div>
+            <div style={{ fontSize: 13, color: "var(--fg-mute)", lineHeight: 1.5 }}>
+              Add a Gemini API key in <strong>Settings</strong> to ask free-form questions grounded in your financial snapshot.
+            </div>
+          </div>
+        ) : (
+          <>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+              {CHIPS.map(chip => (
+                <button
+                  key={chip}
+                  onClick={() => setQuestion(chip)}
+                  style={{
+                    padding: "6px 12px", borderRadius: 20,
+                    background: question === chip ? "var(--accent-soft)" : "var(--surface-2)",
+                    border: `1px solid ${question === chip ? "var(--accent)" : "var(--hairline)"}`,
+                    color: question === chip ? "var(--accent)" : "var(--fg-mute)",
+                    fontSize: 12, cursor: "pointer", fontFamily: "var(--font-sans)",
+                  }}
+                >
+                  {chip}
+                </button>
+              ))}
+            </div>
+
+            <div style={{ display: "flex", gap: 10 }}>
+              <input
+                value={question}
+                onChange={e => setQuestion(e.target.value)}
+                onKeyDown={e => e.key === "Enter" && handleSubmit()}
+                placeholder="Ask anything about your FIRE plan…"
+                style={{
+                  flex: 1, padding: "11px 14px",
+                  background: "var(--surface-2)", border: "1px solid var(--hairline)",
+                  borderRadius: 12, color: "var(--fg)", fontSize: 13,
+                  fontFamily: "var(--font-sans)", outline: "none", boxSizing: "border-box",
+                }}
+              />
+              <Button tone="primary" onClick={handleSubmit} disabled={loading || !question.trim()}>
+                {loading ? "…" : "Ask"}
+              </Button>
+            </div>
+
+            {loading && (
+              <div style={{ padding: "14px 16px", background: "var(--surface-2)", borderRadius: 12, fontSize: 13, color: "var(--fg-mute)" }}>
+                Thinking…
+              </div>
+            )}
+
+            {error && (
+              <div style={{ padding: "12px 14px", background: "var(--bad-soft)", borderRadius: 10, fontSize: 13, color: "var(--bad)" }}>
+                {error}
+              </div>
+            )}
+
+            {answer && (
+              <div style={{ padding: "14px 16px", background: "var(--surface-2)", borderRadius: 12, border: "1px solid var(--hairline)" }}>
+                <div style={{ fontSize: 13, color: "var(--fg)", lineHeight: 1.65, whiteSpace: "pre-wrap" }}>
+                  {answer}
+                </div>
+              </div>
+            )}
+          </>
+        )}
+
+        <div style={{ borderTop: "1px solid var(--hairline)", paddingTop: 14, fontSize: 11, color: "var(--fg-soft)", lineHeight: 1.6, textAlign: "center" }}>
+          Sends your financial snapshot to Google Gemini · Advisory only — the dashboard's numbers are authoritative.
+        </div>
+      </Stack>
+    </Sheet>
+  );
+}
+
+function Header({ onSettings, onAskCompass, isMobile, currentPhase }) {
   return (
     <header style={{
       position: "sticky", top: 0, zIndex: 20,
@@ -330,6 +474,18 @@ function Header({ onSettings, isMobile, currentPhase }) {
         <Row gap={8} align="center">
           {!isMobile && <Pill tone="ghost" size="sm">{PHASES[currentPhase]?.label || "Setup"}</Pill>}
           <button
+            onClick={onAskCompass}
+            aria-label="Ask Compass"
+            style={{
+              width: 38, height: 38, borderRadius: 10,
+              background: "var(--surface-1)", border: "1px solid var(--hairline)",
+              color: "var(--fg-mute)", cursor: "pointer",
+              display: "flex", alignItems: "center", justifyContent: "center",
+            }}
+          >
+            <Icon name="sparkle" size={16} />
+          </button>
+          <button
             onClick={onSettings}
             aria-label="Settings"
             style={{
@@ -352,6 +508,7 @@ function App() {
   const [state, setState, loaded] = usePersistedState(DEFAULT_STATE);
   const [tab, setTab] = useState("today");
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [askCompassOpen, setAskCompassOpen] = useState(false);
 
   const tabs = [
     { id: "today",   label: "Today",   icon: <Icon name="today"   size={isMobile ? 20 : 14} /> },
@@ -373,7 +530,7 @@ function App() {
 
   return (
     <div style={{ minHeight: "100vh" }}>
-      <Header onSettings={() => setSettingsOpen(true)} isMobile={isMobile} currentPhase={state.currentPhase} />
+      <Header onSettings={() => setSettingsOpen(true)} onAskCompass={() => setAskCompassOpen(true)} isMobile={isMobile} currentPhase={state.currentPhase} />
 
       {!isMobile && (
         <div style={{
@@ -396,6 +553,7 @@ function App() {
       {isMobile && <TabBar value={tab} onChange={setTab} tabs={tabs} isMobile={true} />}
 
       <SettingsSheet open={settingsOpen} onClose={() => setSettingsOpen(false)} state={state} setState={setState} />
+      <AskCompass open={askCompassOpen} onClose={() => setAskCompassOpen(false)} state={state} />
     </div>
   );
 }
