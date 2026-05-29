@@ -1034,7 +1034,7 @@ function simulateAffordability(state, { funDelta = 0, essentialsDelta = 0, oneOf
   }
 
   return { before, after, deltaMonths, oneOffMonths, verdict: { tone, headline, text } };
-
+}
 
 function buildAIContext(state) {
   const cf = deriveCashflow(state);
