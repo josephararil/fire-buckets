@@ -30,9 +30,9 @@ Load order in `index.html`: `engine.js` → `ui.js` → `today.js` → `plan.js`
 
 ## Deployment
 
-Push to `main` → auto-deploys to GitHub Pages. `.nojekyll` disables Jekyll so static files are served as-is.
+Push to `main` → auto-deploys to GitHub Pages. `.nojekyll` disables Jekyll so static files are served as-is. Always push to feature branch, so user has the ability to raise PRs against main.
 
-**After any change, bump `APP_VERSION` in `engine.js` AND `SW_VERSION` in `sw.js`** (format: `YYYYMMDD.N`, e.g. `"20260508.0"`). The two strings must stay in sync — they live in separate execution contexts. Bumping only one does not invalidate the cache.
+**After any change, bump `APP_VERSION` in `engine.js` AND `SW_VERSION` in `sw.js`** (format: `YYYYMMDD.N`, e.g. `"20260508.0"`). The two strings must stay in sync — they live in separate execution contexts. Bumping only one does not invalidate the cache. Current version: `"20260529.0"`.
 
 ## GitHub CLI
 
@@ -75,6 +75,8 @@ Push to `main` → auto-deploys to GitHub Pages. `.nojekyll` disables Jekyll so 
 - `effectiveFloor(bucketCfg, monthlyTotal)` — `max(staticFloor, floorMonths × monthlyTotal)`.
 - `effectiveLastWithdrawal(state)` — returns the most recent `gkHistory.finalWithdrawal` if available; otherwise `0` when accumulating (surplus ≥ 0) and `annualExpenses` only when actively drawing. Replaces the older "always default to `annualExpenses`" fallback, which produced a phantom Cut-zone WR while employed.
 - `nextRebalanceBucket(state)` — returns `{ underweight, overweight }`. `underweight` is the most pressing bucket to add money to (floor deficit > %-allocation deficit), with `floor`, `floorMonths`, `targetPct`, and `range` fields so the UI can explain the choice. `overweight` is the most-overweight bucket beyond its range upper (with a 0.5%-of-portfolio noise tolerance), or `null`.
+- `realMonthlyRate(state)` — Fisher-equation real return converted to a monthly rate: `(1+nominal)/(1+inflation)−1` annualised, then `(1+real)^(1/12)−1`. Used by `simulateAffordability` and `TodayView` (replaces the inline computation that was duplicated there).
+- `simulateAffordability(state, { funDelta, essentialsDelta, oneOff, exitPortfolio })` → `{ before, after, deltaMonths, oneOffMonths, verdict }` — sandbox spending-impact engine. Computes before/after in terms of `monthlyExpenses`, `annualExpenses`, `surplusMonthly`, `fireTarget`, `monthsToFire`, `exitWR`, `exitZone`. One-off is modelled as `ceil(oneOff / surplusMonthly)` months added to `before.monthsToFire` (doesn't change fireTarget). `verdict = { tone, headline, text }`: `bad`/"No." if after zone is elevated/cut; `warn`/"Careful." if deltaMonths > 12 or zone worsened; else `good`/"Fine."
 - `monthlyOutlook(state)` — structured monthly plan with three modes: `"accumulating"` (surplus ≥ 0 and either no GK history or still in an earning phase — `employed` / `coast_fire` / `barista_fire`), `"lean_drawdown"` (small shortfall fully covered by trimming fun), `"shortfall"` (draw required, with cascade source Cash → XEON → Bonds → VWCE). Returns `{ mode, primary: { verb, amount, bucketKey, meta, reason }, secondary: [...], floorContext, headline, subtitle, ... }`. In `accumulating` mode, `funCut` is always 0 (the prior zone-based fun-budget holdback was wrong for employed users not drawing from the portfolio). Secondary actions include `rebalance_out` (flag overweight buckets), `fun_trim`, `xeon_low`, `cgt`.
 - `monthlyRecommendation(state)` — thin alias for `monthlyOutlook` kept for back-compat; remaps `mode: "accumulating"` to `"surplus"`.
 
@@ -98,12 +100,13 @@ Push to `main` → auto-deploys to GitHub Pages. `.nojekyll` disables Jekyll so 
 1. **Hero** — `ProgressRing` rebased to **Bulletproof FIRE as 100%** (not Aggressive), so the ring is a true journey map. Four milestone ticks drawn on the ring arc at their proportional positions. Portfolio total, gap-to-FIRE sentence (3-way branch: crossed / finite pace / no-surplus). `MilestoneJourney` SVG bar below the sentence: horizontal track with milestone dots + user pin + "Next milestone: X in Y" headline. No coverage cards in the hero.
 2. **GK zone ribbon** (`GKZoneRibbon`) — **only rendered when `outlook.mode !== "accumulating"`**, placed **directly under the hero** with `tone="accent"` for visual weight. WR marker is white-fill + colored ring. Rationale shows concrete €amounts. `currentAnnual` and `proposedAnnual` props.
 3. **Portfolio capacity today** (`PortfolioCapacityCard`) — safe monthly income shown big once (€/mo + €/yr at 4% IWR), then `CoverageBar` for Essentials and Full lifestyle (% + gap + inline progress bar). Tone-coded: good/warn/bad.
-4. **This Month** (`ThisMonthCard`) — action card. Mode pill top-right. Cashflow chip strip. Primary action block with bucket-color border, Why/After rationale. Floor tracker when floor-driven. Secondary rows: `rebalance_out`, `fun_trim`, `xeon_low`, `cgt`.
-5. **FIRE milestones** — compact `MilestoneRow` per tier (dot + name + WR badge + 80px mini-bar + months right-aligned). Lean FIRE caution shrunk to `⚠` tooltip (`title` attribute). "If contributions stopped tomorrow" footnote in a `Disclosure` (collapsed by default).
-6. **Runway + Allocation** two-up:
+4. **Affordability sandbox** (`AffordabilityCard`) — what-if spending card placed immediately after portfolio capacity. `NumberField` for fun budget (seeded from `state.monthlyFunEUR`) + preset chips (+€100, +€200, €5k one-off) + Reset. Calls `simulateAffordability` on every change. Shows tone-colored verdict (headline + sentence), then a two-column before→after grid: FIRE date, target, exit WR pill, ±months delta. "Apply to Plan" button updates `monthlyFunEUR` in state (only shown for recurring fun changes, not for one-offs). **Never auto-mutates state** — sandbox only until Apply is clicked.
+5. **This Month** (`ThisMonthCard`) — action card. Mode pill top-right. Cashflow chip strip. Primary action block with bucket-color border, Why/After rationale. Floor tracker when floor-driven. Secondary rows: `rebalance_out`, `fun_trim`, `xeon_low`, `cgt`.
+6. **FIRE milestones** — compact `MilestoneRow` per tier (dot + name + WR badge + 80px mini-bar + months right-aligned). Lean FIRE caution shrunk to `⚠` tooltip (`title` attribute). "If contributions stopped tomorrow" footnote in a `Disclosure` (collapsed by default).
+7. **Runway + Allocation** two-up:
    - **Runway**: `safeRunwayMonths` = (XEON + Cash + Bonds) / monthlyExpenses (all 3 defense buckets, not just Safety+Cash). `RunwayStackedBar` shows Cash / Safety / Stability segments proportional to months, with hatched Growth tail. Axis labels below. Chips removed.
    - **Allocation**: donut + drift rows with `|drift| ≥ 1.5 pp` Pill badges. Rebalance hint appended when any bucket drifts ≥ 3 pp.
-7. **Decisions ahead** — sorted by urgency (`immediate > week > month > quarter`). Top 2 shown inline via `TriggerRow`. Remaining hidden in `Disclosure` ("Show N more"). `TriggerRow` is a module-level helper component.
+8. **Decisions ahead** — sorted by urgency (`immediate > week > month > quarter`). Top 2 shown inline via `TriggerRow`. Remaining hidden in `Disclosure` ("Show N more"). `TriggerRow` is a module-level helper component.
 
 `fmtMonths(n)` and `fmtETA(n)` are **module-level** helpers (not inside `TodayView`) — shared by `MilestoneJourney`, `MilestoneRow`, and `TodayView`.
 
@@ -111,7 +114,7 @@ Push to `main` → auto-deploys to GitHub Pages. `.nojekyll` disables Jekyll so 
 
 `ringProgress = portfolio / bulletproofTarget` drives the ring arc and label. `progress = portfolio / fireTarget` (Aggressive) drives the hero sentence logic only.
 
-`monthsToTarget(portfolio, target, monthlySurplus, realReturnMonthly)` — standalone pure function in `engine.js` (exported to `window`). Uses the closed-form FV formula `n = ln((F·r + c) / (P·r + c)) / ln(1+r)` with **geometric monthly rate** `r = (1 + realReturn)^(1/12) − 1` (not nominal `r/12`). Guards negative denominators to return `Infinity`. Used by both Today and Freedom tabs.
+`monthsToTarget(portfolio, target, monthlySurplus, realReturnMonthly)` — standalone pure function in `engine.js` (exported to `window`). Uses the closed-form FV formula `n = ln((F·r + c) / (P·r + c)) / ln(1+r)` with **geometric monthly rate** `r = (1 + realReturn)^(1/12) − 1` (not nominal `r/12`). Guards negative denominators to return `Infinity`. Used by Today, Freedom, and `simulateAffordability`. The inline duplicate that previously lived in `TodayView` has been removed — all callers now use this engine version.
 
 **Plan** (`plan.js`) — strategy inputs. This is the **single source of truth** for all financial variables. Today and Freedom are visualization-only dashboards; Plan is where numbers are entered.
 - **Phase selector** — `PhaseBadge` buttons with active state: accent border + glow + dot indicator + accent-colored text on the active phase. (3×2 grid on mobile, 3-column on desktop for 6 phases; switches `currentPhase`; switching to `laid_off` zeros primary salary.)
@@ -244,7 +247,7 @@ Optional cross-device sync. Setup: classic PAT at `github.com/settings/tokens` w
 
 ### Tests (`tests.html`)
 
-Open in browser. `engine.js` exposes `window.__FIRE_TESTS__` with `{ calcGKNextStep, runGKSimulation, runMonteCarlo, sampleCorrelatedPaths, sampleReturnPath, sampleInflationPath, gaussianSample, GK_CONFIG, PHASES }`. Tests render pass/fail counts in-page.
+Open in browser. Loads the full script stack (engine.js → … → script.js) in the same order as `index.html`. `engine.js` exposes `window.__FIRE_TESTS__` with `{ calcGKNextStep, runGKSimulation, runMonteCarlo, sampleCorrelatedPaths, sampleReturnPath, sampleInflationPath, gaussianSample, GK_CONFIG, PHASES, simulateAffordability, realMonthlyRate }`. Tests render pass/fail counts in-page.
 
 ## Key Conventions
 

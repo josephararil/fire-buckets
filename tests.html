@@ -25,10 +25,17 @@
 <div id="results"></div>
 <div id="root" style="display:none"></div>
 
-<!-- Same dependencies as the main app — reuse the live engine -->
+<!-- Same load order as index.html — engine.js exposes window.__FIRE_TESTS__ -->
 <script src="https://unpkg.com/react@18/umd/react.development.js"></script>
 <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
 <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<script type="text/babel" src="engine.js"></script>
+<script type="text/babel" src="ui.js"></script>
+<script type="text/babel" src="today.js"></script>
+<script type="text/babel" src="plan.js"></script>
+<script type="text/babel" src="freedom.js"></script>
+<script type="text/babel" src="stress.js"></script>
+<script type="text/babel" src="history.js"></script>
 <script type="text/babel" src="script.js"></script>
 
 <script>
@@ -176,6 +183,72 @@ group("runMonteCarlo — basic sanity", (T) => {
   });
   out.push(assert(stressed.successRate < 0.95, "10% WR + low μ → success rate < 95%", `got ${(stressed.successRate * 100).toFixed(1)}%`));
   out.push(assert(stressed.preservationCutRate > 0.5, "10% WR → most paths trigger ≥1 cut", `got ${(stressed.preservationCutRate * 100).toFixed(1)}%`));
+  return out;
+});
+
+group("simulateAffordability — verdict logic", (T) => {
+  const { simulateAffordability, realMonthlyRate } = T;
+  const out = [];
+
+  // Base state: portfolio €600k, essentials €1800, fun €200, salary €8000
+  // fireTarget before = (1800+200)×12 / 0.04 = 600k (exactly at target)
+  // exitWR before = 24000/600000 = 4.0% → safe zone
+  const baseState = {
+    bucketVWCE: 540000, bucketXEON: 30000, bucketFixedIncome: 20000, bucketCash: 10000,
+    monthlyEssentialsEUR: 1800, monthlyFunEUR: 200,
+    monthlySalaryEUR: 8000, monthlySalaryPartnerEUR: 0,
+    currentPhase: "employed",
+    gkNominalReturn: 7.0, gkInflation: 2.0, bgCgtRatePct: 0,
+    gkHistory: [],
+    freelanceEnabled: false, parttimeEnabled: false, passiveEnabled: false,
+    freelanceAmt: 0, parttimeAmt: 0, passiveAmt: 0,
+    freelanceDur: 600, parttimeDur: 600, passiveDur: 600,
+  };
+
+  // Before: portfolio = 600k, annualExpenses = 24000, fireTarget = 600k
+  // exitWR = 24000/600000 = 4.0% → should be safe zone
+  const simNoDelta = simulateAffordability(baseState, {});
+  out.push(assert(simNoDelta.before.fireTarget === 600000, "before fireTarget = 600k", `got ${simNoDelta.before.fireTarget}`));
+  out.push(assert(simNoDelta.before.exitWR > 3.9 && simNoDelta.before.exitWR < 4.1, "before exitWR ≈ 4.0%", `got ${simNoDelta.before.exitWR.toFixed(2)}%`));
+  out.push(assert(simNoDelta.before.exitZone.id === "safe" || simNoDelta.before.exitZone.id === "elevated", "before zone is safe or elevated at 4%", `got ${simNoDelta.before.exitZone.id}`));
+
+  // funDelta +200 (fun €200→€400): afterMonthlyExpenses = 2200, afterAnnualExpenses = 26400
+  // afterFireTarget = 26400/0.04 = 660k; exitWR = 26400/600000 = 4.4% → elevated
+  const simFun200 = simulateAffordability(baseState, { funDelta: 200 });
+  out.push(assert(simFun200.after.fireTarget === 660000, "after fireTarget = 660k (+€200/mo fun)", `got ${simFun200.after.fireTarget}`));
+  out.push(assert(simFun200.after.monthlyExpenses === 2200, "after monthlyExpenses = 2200", `got ${simFun200.after.monthlyExpenses}`));
+  out.push(assert(simFun200.after.surplusMonthly === 5800, "after surplus = 5800", `got ${simFun200.after.surplusMonthly}`));
+  out.push(assert(simFun200.after.exitWR > 4.3 && simFun200.after.exitWR < 4.5, "after exitWR ≈ 4.4% (elevated)", `got ${simFun200.after.exitWR.toFixed(2)}%`));
+  out.push(assert(simFun200.verdict.tone === "bad", "verdict.tone === bad (elevated zone)", `got ${simFun200.verdict.tone}`));
+  out.push(assert(simFun200.verdict.headline === "No.", "verdict.headline === No.", `got ${simFun200.verdict.headline}`));
+
+  // funDelta +50 (small raise, stays in safe zone)
+  // afterAnnualExpenses = (2050)×12 = 24600, afterFireTarget = 615k
+  // afterExitWR = 24600/600000 = 4.1% → still elevated? Let's check zone boundaries
+  // Actually let's use a smaller delta that stays safe: try +10 → 2010/mo → 24120/yr → 4.02% → elevated
+  // The safe zone is 3.2–4.0%. At 4% IWR, any fun increase pushes WR above 4% with portfolio = fireTarget.
+  // So we need portfolio > fireTarget for a raise to stay in safe zone.
+  // Use portfolio = 700k (above fireTarget of 600k)
+  const richState = { ...baseState, bucketVWCE: 630000, bucketXEON: 40000, bucketFixedIncome: 20000, bucketCash: 10000 };
+  // portfolio = 700k, fireTarget before = 600k (already passed), exitWR = 24000/700000 = 3.43% → safe
+  const simRichNoDelta = simulateAffordability(richState, {});
+  out.push(assert(simRichNoDelta.before.exitZone.id === "safe" || simRichNoDelta.before.exitZone.id === "prosperity", "rich state before zone is safe/prosperity", `got ${simRichNoDelta.before.exitZone.id}`));
+
+  // With portfolio=700k, funDelta+200: exitWR = 26400/700000 = 3.77% → still safe
+  const simRichFun200 = simulateAffordability(richState, { funDelta: 200 });
+  out.push(assert(simRichFun200.after.exitWR > 3.7 && simRichFun200.after.exitWR < 3.8, "rich +€200/mo: exitWR ≈ 3.77% (safe)", `got ${simRichFun200.after.exitWR.toFixed(2)}%`));
+  out.push(assert(simRichFun200.verdict.tone === "good" || simRichFun200.verdict.tone === "warn", "rich +€200/mo: verdict not bad", `got ${simRichFun200.verdict.tone}`));
+
+  // One-off €5000: should not change fireTarget; delays by ceil(5000/surplus) months
+  const simOneOff = simulateAffordability(baseState, { oneOff: 5000 });
+  out.push(assert(simOneOff.after.fireTarget === simOneOff.before.fireTarget, "one-off doesn't change fireTarget", `before=${simOneOff.before.fireTarget} after=${simOneOff.after.fireTarget}`));
+  // surplus = 8000-2000 = 6000; oneOffMonths = ceil(5000/6000) = 1
+  out.push(assert(simOneOff.oneOffMonths === 1, "one-off €5k with €6k surplus → 1 month delay", `got ${simOneOff.oneOffMonths}`));
+
+  // realMonthlyRate sanity check
+  const r = realMonthlyRate({ gkNominalReturn: 7.0, gkInflation: 2.0 });
+  out.push(assert(r > 0.003 && r < 0.005, "realMonthlyRate(7%/2%) ≈ 0.004", `got ${r.toFixed(6)}`));
+
   return out;
 });
 

@@ -1,6 +1,6 @@
 // ─── Compass FIRE Planner — Engine (pure math, state shape preserved) ───
 
-const APP_VERSION = "20260519.0";
+const APP_VERSION = "20260529.0";
 
 const GK_CONFIG = {
   IWR: 0.04,
@@ -917,6 +917,92 @@ function monthsToTarget(portfolio, target, monthlySurplus, realReturnMonthly) {
   return Number.isFinite(n) && n > 0 && n <= 600 ? Math.ceil(n) : Infinity;
 }
 
+function realMonthlyRate(state) {
+  const nominal = (state.gkNominalReturn || 7.0) / 100;
+  const inf     = (state.gkInflation    || 2.0) / 100;
+  const real    = (1 + nominal) / (1 + inf) - 1;
+  return Math.pow(1 + real, 1 / 12) - 1;
+}
+
+function simulateAffordability(state, { funDelta = 0, essentialsDelta = 0, oneOff = 0, exitPortfolio = null } = {}) {
+  const cf       = deriveCashflow(state);
+  const portfolio = (state.bucketVWCE || 0) + (state.bucketXEON || 0) + (state.bucketFixedIncome || 0) + (state.bucketCash || 0);
+  const exitPort  = exitPortfolio !== null ? exitPortfolio : portfolio;
+  const r         = realMonthlyRate(state);
+
+  // ── Before ────────────────────────────────────────────────────────────────
+  const bMonthlyExp = cf.totalExpenses;
+  const bAnnualExp  = cf.annualExpenses;
+  const bSurplus    = cf.surplusMonthly;
+  const bFireTarget = bAnnualExp / GK_CONFIG.IWR;
+  const bMonths     = monthsToTarget(portfolio, bFireTarget, bSurplus, r);
+  const bExitWR     = exitPort > 0 ? (bAnnualExp / exitPort) * 100 : 0;
+  const bExitZone   = getGKZone(bExitWR);
+
+  const before = {
+    monthlyExpenses: bMonthlyExp,
+    annualExpenses:  bAnnualExp,
+    surplusMonthly:  bSurplus,
+    fireTarget:      bFireTarget,
+    monthsToFire:    bMonths,
+    exitWR:          bExitWR,
+    exitZone:        bExitZone,
+  };
+
+  // ── After (recurring change) ───────────────────────────────────────────────
+  const aMonthlyExp = bMonthlyExp + funDelta + essentialsDelta;
+  const aAnnualExp  = aMonthlyExp * 12;
+  const aSurplus    = cf.incomeMonthly - aMonthlyExp;
+  const aFireTarget = aAnnualExp / GK_CONFIG.IWR;
+  const aMonths     = monthsToTarget(portfolio, aFireTarget, aSurplus, r);
+  const aExitWR     = exitPort > 0 ? (aAnnualExp / exitPort) * 100 : 0;
+  const aExitZone   = getGKZone(aExitWR);
+
+  const after = {
+    monthlyExpenses: aMonthlyExp,
+    annualExpenses:  aAnnualExp,
+    surplusMonthly:  aSurplus,
+    fireTarget:      aFireTarget,
+    monthsToFire:    aMonths,
+    exitWR:          aExitWR,
+    exitZone:        aExitZone,
+  };
+
+  // One-off delay (independent of recurring delta)
+  const oneOffMonths = (oneOff > 0 && bSurplus > 0)
+    ? Math.ceil(oneOff / bSurplus)
+    : (oneOff > 0 ? Infinity : 0);
+
+  // Delta months (recurring only)
+  const deltaMonths = (Number.isFinite(aMonths) && Number.isFinite(bMonths))
+    ? aMonths - bMonths
+    : (!Number.isFinite(aMonths) && !Number.isFinite(bMonths)) ? 0 : Infinity;
+
+  // ── Verdict ────────────────────────────────────────────────────────────────
+  const ZONE_ORDER   = ["covered", "prosperity", "safe", "elevated", "cut"];
+  const bZoneIdx     = ZONE_ORDER.indexOf(bExitZone.id);
+  const aZoneIdx     = ZONE_ORDER.indexOf(aExitZone.id);
+  const zoneWorsened = aZoneIdx > bZoneIdx;
+
+  let tone, headline, text;
+  if (aExitZone.id === "cut" || aExitZone.id === "elevated") {
+    tone = "bad"; headline = "No.";
+    text = `At ${fmtEur(aMonthlyExp)}/mo, exit WR is ${aExitWR.toFixed(1)}% (${aExitZone.label}) — outside safe-withdrawal range.`;
+  } else if ((Number.isFinite(deltaMonths) && deltaMonths > 12) || zoneWorsened) {
+    tone = "warn"; headline = "Careful.";
+    const dtText = Number.isFinite(deltaMonths) && deltaMonths !== 0
+      ? ` FIRE moves ${deltaMonths > 0 ? "+" : ""}${Math.round(deltaMonths)} months.` : "";
+    text = `Exit WR ${aExitWR.toFixed(1)}% (${aExitZone.label}).${dtText}`;
+  } else {
+    tone = "good"; headline = "Fine.";
+    const dtText = Number.isFinite(deltaMonths) && deltaMonths !== 0
+      ? ` FIRE moves ${deltaMonths > 0 ? "+" : ""}${Math.round(deltaMonths)} months.` : " No change to timeline.";
+    text = `Exit WR ${aExitWR.toFixed(1)}% stays in the ${aExitZone.label} zone.${dtText}`;
+  }
+
+  return { before, after, deltaMonths, oneOffMonths, verdict: { tone, headline, text } };
+}
+
 Object.assign(window, {
   APP_VERSION, GK_CONFIG, PHASES, BUCKET_META, TRIGGERS, URGENCY_ORDER,
   fmtEur, fmtEurK, fmtPct, getGKZone,
@@ -924,12 +1010,12 @@ Object.assign(window, {
   sampleCorrelatedPaths, sampleReturnPath, sampleInflationPath, gaussianSample,
   deriveCashflow, nextRebalanceBucket, monthlyRecommendation, monthlyOutlook,
   effectiveFloor, effectiveLastWithdrawal,
-  evaluateTriggers, monthsToTarget,
+  evaluateTriggers, monthsToTarget, realMonthlyRate, simulateAffordability,
   loadState, saveState, loadFromGist, saveToGist, GIST_FILENAME,
 });
 
 window.__FIRE_TESTS__ = {
   calcGKNextStep, runGKSimulation, runMonteCarlo,
   sampleCorrelatedPaths, sampleReturnPath, sampleInflationPath, gaussianSample,
-  GK_CONFIG, PHASES,
+  GK_CONFIG, PHASES, simulateAffordability, realMonthlyRate,
 };
