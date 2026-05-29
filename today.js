@@ -604,6 +604,186 @@ function ThisMonthCard({ outlook, state, isMobile, monthsOf }) {
   );
 }
 
+// ─── AffordabilityCard — spending sandbox ────────────────────────────────────
+function AffordabilityCard({ state, setState, isMobile }) {
+  const baseFun = state.monthlyFunEUR || 0;
+  const [sandboxFun, setSandboxFun] = React.useState(baseFun);
+  const [oneOff, setOneOff] = React.useState(0);
+
+  // Keep sandbox in sync when Plan applies a change
+  React.useEffect(() => {
+    setSandboxFun(state.monthlyFunEUR || 0);
+  }, [state.monthlyFunEUR]);
+
+  const funDelta  = sandboxFun - baseFun;
+  const hasChange = funDelta !== 0 || oneOff > 0;
+
+  const sim = simulateAffordability(state, { funDelta, oneOff });
+  const { before, after, deltaMonths, oneOffMonths, verdict } = sim;
+
+  const verdictColor = verdict.tone === "good" ? "var(--good)" : verdict.tone === "warn" ? "var(--warn)" : "var(--bad)";
+  const verdictBg    = verdict.tone === "good" ? "var(--good-soft)" : verdict.tone === "warn" ? "var(--warn-soft)" : "rgba(239,115,115,0.08)";
+
+  // For one-off only: shift the before timeline by oneOffMonths, keep same target/zone
+  const isOneOffOnly  = oneOff > 0 && funDelta === 0;
+  const afterMonths   = isOneOffOnly
+    ? (Number.isFinite(before.monthsToFire) && Number.isFinite(oneOffMonths)
+        ? before.monthsToFire + oneOffMonths : Infinity)
+    : after.monthsToFire;
+  const afterTarget   = isOneOffOnly ? before.fireTarget  : after.fireTarget;
+  const afterZone     = isOneOffOnly ? before.exitZone    : after.exitZone;
+  const afterWR       = isOneOffOnly ? before.exitWR      : after.exitWR;
+
+  const chipStyle = (active) => ({
+    padding: "5px 11px", borderRadius: 999, fontSize: 12, fontWeight: 600,
+    cursor: "pointer", userSelect: "none",
+    border: `1px solid ${active ? "var(--accent)" : "var(--hairline)"}`,
+    background: active ? "var(--accent-soft)" : "var(--surface-2)",
+    color: active ? "var(--accent)" : "var(--fg-mute)",
+  });
+
+  const isInfBefore = !Number.isFinite(before.monthsToFire);
+  const isInfAfter  = !Number.isFinite(afterMonths);
+
+  return (
+    <Card padding={isMobile ? 20 : 24}>
+      <SectionHeader
+        title="Affordability sandbox"
+        subtitle="Try a spending change without saving it. 'Apply' commits to Plan."
+      />
+
+      <Stack gap={10} style={{ marginBottom: 14 }}>
+        <NumberField
+          label="Fun budget"
+          value={sandboxFun}
+          onChange={v => { setSandboxFun(v); setOneOff(0); }}
+          min={0} step={25}
+          prefix="€" format={v => v.toLocaleString("en-GB")}
+        />
+        <Row gap={6} wrap>
+          {[100, 200].map(d => {
+            const v = baseFun + d;
+            return (
+              <button key={d}
+                onClick={() => { setSandboxFun(v); setOneOff(0); }}
+                style={chipStyle(sandboxFun === v && oneOff === 0)}>
+                +€{d}
+              </button>
+            );
+          })}
+          <button
+            onClick={() => { setSandboxFun(baseFun); setOneOff(5000); }}
+            style={chipStyle(oneOff === 5000 && sandboxFun === baseFun)}>
+            €5k one-off
+          </button>
+          {hasChange && (
+            <button
+              onClick={() => { setSandboxFun(baseFun); setOneOff(0); }}
+              style={{ ...chipStyle(false), color: "var(--fg-soft)" }}>
+              Reset
+            </button>
+          )}
+        </Row>
+      </Stack>
+
+      {!hasChange && (
+        <div style={{ fontSize: 13, color: "var(--fg-mute)", lineHeight: 1.6 }}>
+          Adjust the fun budget or choose a preset to see the impact on your FIRE timeline and exit WR.
+        </div>
+      )}
+
+      {hasChange && (
+        <Stack gap={12}>
+          {/* Verdict */}
+          <div style={{
+            padding: "11px 14px", borderRadius: 10,
+            background: verdictBg, border: `1px solid ${verdictColor}40`,
+          }}>
+            <Row gap={8} align="baseline" wrap>
+              <span style={{ fontSize: 14, fontWeight: 700, color: verdictColor, flexShrink: 0 }}>
+                {verdict.headline}
+              </span>
+              <span style={{ fontSize: 13, color: "var(--fg-mute)", lineHeight: 1.5 }}>
+                {verdict.text}
+              </span>
+            </Row>
+          </div>
+
+          {/* Before → After */}
+          <div style={{
+            padding: "12px 14px", background: "var(--surface-2)", borderRadius: 10,
+            display: "grid",
+            gridTemplateColumns: isMobile ? "1fr auto 1fr" : "1fr auto 1fr",
+            gap: "0 12px", alignItems: "start",
+          }}>
+            {/* Before column */}
+            <div>
+              <div style={{ fontSize: 11, color: "var(--fg-soft)", textTransform: "uppercase", letterSpacing: "0.07em", fontWeight: 600, marginBottom: 6 }}>Now</div>
+              <div style={{ fontSize: 15, fontWeight: 700, color: "var(--fg)", fontFamily: "var(--font-mono)" }}>
+                {fmtMonths(before.monthsToFire)}
+              </div>
+              {!isInfBefore && before.monthsToFire > 0 && fmtETA(before.monthsToFire) && (
+                <div style={{ fontSize: 11, color: "var(--fg-soft)", marginTop: 1 }}>
+                  {fmtETA(before.monthsToFire)}
+                </div>
+              )}
+              <div style={{ fontSize: 11, color: "var(--fg-mute)", marginTop: 4, fontFamily: "var(--font-mono)" }}>
+                Target {fmtEur(before.fireTarget)}
+              </div>
+              <div style={{ marginTop: 5 }}>
+                <Pill tone={before.exitZone.tone} size="xs">
+                  {before.exitWR.toFixed(1)}% · {before.exitZone.label}
+                </Pill>
+              </div>
+            </div>
+
+            {/* Arrow */}
+            <div style={{ color: "var(--fg-soft)", fontSize: 16, paddingTop: 18 }}>→</div>
+
+            {/* After column */}
+            <div>
+              <div style={{ fontSize: 11, color: "var(--fg-soft)", textTransform: "uppercase", letterSpacing: "0.07em", fontWeight: 600, marginBottom: 6 }}>
+                {isOneOffOnly ? "After €5k" : `Fun ${fmtEur(sandboxFun)}/mo`}
+              </div>
+              <div style={{ fontSize: 15, fontWeight: 700, color: "var(--fg)", fontFamily: "var(--font-mono)" }}>
+                {fmtMonths(afterMonths)}
+              </div>
+              {!isInfAfter && afterMonths > 0 && fmtETA(afterMonths) && (
+                <div style={{ fontSize: 11, color: "var(--fg-soft)", marginTop: 1 }}>
+                  {fmtETA(afterMonths)}
+                </div>
+              )}
+              <div style={{ fontSize: 11, color: "var(--fg-mute)", marginTop: 4, fontFamily: "var(--font-mono)" }}>
+                Target {fmtEur(afterTarget)}
+              </div>
+              <Row gap={6} align="center" style={{ marginTop: 5 }}>
+                <Pill tone={afterZone.tone} size="xs">
+                  {afterWR.toFixed(1)}% · {afterZone.label}
+                </Pill>
+                {funDelta !== 0 && Number.isFinite(deltaMonths) && (
+                  <span style={{ fontSize: 11, fontFamily: "var(--font-mono)", color: deltaMonths > 0 ? "var(--warn)" : "var(--good)" }}>
+                    {deltaMonths > 0 ? "+" : ""}{Math.round(deltaMonths)} mo
+                  </span>
+                )}
+              </Row>
+            </div>
+          </div>
+
+          {/* Apply button — only for recurring changes */}
+          {funDelta !== 0 && (
+            <Button
+              tone="secondary"
+              onClick={() => setState(s => ({ ...s, monthlyFunEUR: sandboxFun }))}
+            >
+              Apply to Plan
+            </Button>
+          )}
+        </Stack>
+      )}
+    </Card>
+  );
+}
+
 function TodayView({ state, setState }) {
   const { isMobile } = useViewport();
   const cf = deriveCashflow(state);
@@ -627,30 +807,8 @@ function TodayView({ state, setState }) {
   const ringProgress  = bulletproofTarget > 0 ? Math.min(1, portfolio / bulletproofTarget) : 0;
   const fireGap       = Math.max(0, fireTarget - portfolio);
 
-  const realReturnMonthly = Math.pow(1 + realReturn / 100, 1 / 12) - 1;
-  const monthsToTarget = (target) => {
-    if (portfolio >= target) return 0;
-    if (cf.surplusMonthly <= 0 && realReturnMonthly <= 0) return Infinity;
-    if (cf.surplusMonthly <= 0) {
-      const n = Math.log(target / portfolio) / Math.log(1 + realReturnMonthly);
-      return n > 600 ? Infinity : Math.ceil(n);
-    }
-    const r = realReturnMonthly;
-    const c = cf.surplusMonthly;
-    if (r === 0) return Math.ceil((target - portfolio) / c);
-    const numerator   = target    * r + c;
-    const denominator = portfolio * r + c;
-    if (denominator <= 0 || numerator <= 0) return Infinity;
-    const n = Math.log(numerator / denominator) / Math.log(1 + r);
-    return Number.isFinite(n) && n > 0 && n <= 600 ? Math.ceil(n) : Infinity;
-  };
-
-  const _rMonthly = realReturnMonthly;
-  const monthsToFire = cf.surplusMonthly > 0 && fireGap > 0
-    ? (_rMonthly === 0
-        ? Math.ceil(fireGap / cf.surplusMonthly)
-        : Math.log((fireTarget * _rMonthly + cf.surplusMonthly) / (portfolio * _rMonthly + cf.surplusMonthly)) / Math.log(1 + _rMonthly))
-    : (fireGap === 0 ? 0 : Infinity);
+  const realReturnMonthly = realMonthlyRate(state);
+  const monthsToFire = monthsToTarget(portfolio, fireTarget, cf.surplusMonthly, realReturnMonthly);
 
   const monthsLayoffOnly = (() => {
     if (portfolio >= fireTarget) return 0;
@@ -687,7 +845,7 @@ function TodayView({ state, setState }) {
     { id: "bulletproof", label: "Bulletproof",     wr: 0.030,         color: "var(--b-fortress)", sub: "Sequence-risk proof" },
   ].map(m => {
     const target = m.id === "lean" ? (cf.essentials * 12) / m.wr : cf.annualExpenses / m.wr;
-    const months = monthsToTarget(target);
+    const months = monthsToTarget(portfolio, target, cf.surplusMonthly, realReturnMonthly);
     const reached = portfolio >= target;
     return { ...m, target, months, reached };
   });
@@ -749,6 +907,9 @@ function TodayView({ state, setState }) {
         fullLife={cf.essentials + cf.fun}
         isMobile={isMobile}
       />
+
+      {/* ── Affordability sandbox ── */}
+      <AffordabilityCard state={state} setState={setState} isMobile={isMobile} />
 
       {/* ── This month ── */}
       <ThisMonthCard outlook={outlook} state={state} isMobile={isMobile} monthsOf={monthsOf} />

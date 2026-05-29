@@ -2,7 +2,7 @@
 // New IA: Today · Plan · Stress · History
 // Settings (incl. Cloud sync) lives behind a clear button in the header.
 
-const DEFAULT_GIST_ID = "2b713c829a9a20c576dfa7612035e2ad";
+const DEFAULT_GIST_ID = "";
 
 const DEFAULT_STATE = {
   // Buckets
@@ -64,6 +64,12 @@ const DEFAULT_STATE = {
   // Freedom scenario — partner income controls (toggle + duration only; amount from Plan)
   partnerIncludedInScenario: true,
   partnerDurScenario: 600,
+
+  // Custom events (date-based reminders shown in Decisions Ahead)
+  customEvents: [],
+
+  // Employment start date for Freedom §1 tracker (ISO yyyy-mm-dd, empty = hidden)
+  employmentStartDate: "",
 };
 
 function SettingsSheet({ open, onClose, state, setState }) {
@@ -71,6 +77,8 @@ function SettingsSheet({ open, onClose, state, setState }) {
   const [draftGistId, setDraftGistId] = useState(state.cloudGistId || "");
   const [syncStatus, setSyncStatus] = useState(null);
   const [syncing, setSyncing] = useState(false);
+  const [draftEventLabel, setDraftEventLabel] = useState("");
+  const [draftEventDate, setDraftEventDate] = useState("");
 
   useEffect(() => { if (open) { setDraftToken(state.cloudToken || ""); setDraftGistId(state.cloudGistId || ""); setSyncStatus(null); } }, [open, state.cloudToken, state.cloudGistId]);
 
@@ -152,7 +160,6 @@ function SettingsSheet({ open, onClose, state, setState }) {
                 placeholder="auto-generated on first save"
                 style={{ width: "100%", padding: "11px 14px", background: "var(--surface-2)", border: "1px solid var(--hairline)", borderRadius: 12, color: "var(--fg)", fontSize: 13, fontFamily: "var(--font-mono)", outline: "none", boxSizing: "border-box" }}
               />
-              <Button tone="ghost" full onClick={() => setDraftGistId(DEFAULT_GIST_ID)} style={{ marginTop: 8 }}>Use default Gist</Button>
             </div>
             <Row gap={10}>
               <Button tone="primary" full onClick={cloudSave} disabled={syncing}>{syncing ? "Saving…" : "Save to cloud"}</Button>
@@ -210,6 +217,65 @@ function SettingsSheet({ open, onClose, state, setState }) {
                 min={5} max={40} step={5}
                 format={v => `−${v}%`}
               />
+            </div>
+            <div>
+              <div style={{ fontSize: 11, color: "var(--fg-soft)", marginBottom: 6 }}>Employment start date</div>
+              <input
+                type="date" value={state.employmentStartDate || ""}
+                onChange={e => updateState("employmentStartDate", e.target.value)}
+                style={{ width: "100%", padding: "11px 14px", background: "var(--surface-2)", border: "1px solid var(--hairline)", borderRadius: 12, color: "var(--fg)", fontSize: 13, outline: "none", boxSizing: "border-box", colorScheme: "dark" }}
+              />
+            </div>
+          </Stack>
+        </div>
+
+        <div style={{ borderTop: "1px solid var(--hairline)", paddingTop: 20 }}>
+          <div style={{ fontSize: 13, fontWeight: 600, color: "var(--fg)", marginBottom: 4 }}>Custom events</div>
+          <div style={{ fontSize: 12, color: "var(--fg-mute)", lineHeight: 1.5, marginBottom: 14 }}>
+            Date-based reminders shown in "Decisions ahead". Events within 6 months surface automatically.
+          </div>
+          <Stack gap={8}>
+            {(state.customEvents || []).map(evt => (
+              <div key={evt.id} style={{ display: "flex", alignItems: "center", gap: 8, padding: "10px 12px", background: "var(--surface-2)", borderRadius: 10 }}>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontSize: 13, color: "var(--fg)", fontWeight: 500 }}>{evt.label}</div>
+                  <div style={{ fontSize: 11, color: "var(--fg-soft)", marginTop: 2 }}>{evt.date}{evt.note ? ` — ${evt.note}` : ""}</div>
+                </div>
+                <button
+                  onClick={() => setState(s => ({ ...s, customEvents: (s.customEvents || []).filter(e => e.id !== evt.id) }))}
+                  style={{ background: "none", border: "none", color: "var(--fg-soft)", cursor: "pointer", fontSize: 16, lineHeight: 1, padding: "4px 6px", borderRadius: 6 }}
+                  aria-label="Remove event"
+                >✕</button>
+              </div>
+            ))}
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 140px auto", gap: 8, alignItems: "end" }}>
+              <div>
+                <div style={{ fontSize: 11, color: "var(--fg-soft)", marginBottom: 4 }}>Label</div>
+                <input
+                  value={draftEventLabel} onChange={e => setDraftEventLabel(e.target.value)}
+                  placeholder="e.g. Daughter starts school"
+                  onKeyDown={e => { if (e.key === "Enter") { e.preventDefault(); if (draftEventLabel.trim() && draftEventDate) { const id = (typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : String(Date.now())); setState(s => ({ ...s, customEvents: [...(s.customEvents || []), { id, label: draftEventLabel.trim(), date: draftEventDate, note: "" }] })); setDraftEventLabel(""); setDraftEventDate(""); } } }}
+                  style={{ width: "100%", padding: "10px 12px", background: "var(--surface-2)", border: "1px solid var(--hairline)", borderRadius: 10, color: "var(--fg)", fontSize: 13, outline: "none", boxSizing: "border-box" }}
+                />
+              </div>
+              <div>
+                <div style={{ fontSize: 11, color: "var(--fg-soft)", marginBottom: 4 }}>Date</div>
+                <input
+                  type="date" value={draftEventDate} onChange={e => setDraftEventDate(e.target.value)}
+                  style={{ width: "100%", padding: "10px 12px", background: "var(--surface-2)", border: "1px solid var(--hairline)", borderRadius: 10, color: "var(--fg)", fontSize: 13, outline: "none", boxSizing: "border-box", colorScheme: "dark" }}
+                />
+              </div>
+              <Button
+                tone="secondary"
+                onClick={() => {
+                  if (!draftEventLabel.trim() || !draftEventDate) return;
+                  const id = (typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : String(Date.now()));
+                  setState(s => ({ ...s, customEvents: [...(s.customEvents || []), { id, label: draftEventLabel.trim(), date: draftEventDate, note: "" }] }));
+                  setDraftEventLabel("");
+                  setDraftEventDate("");
+                }}
+                disabled={!draftEventLabel.trim() || !draftEventDate}
+              >Add</Button>
             </div>
           </Stack>
         </div>

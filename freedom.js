@@ -3,8 +3,6 @@
 
 const { useMemo } = React;
 
-const EMPLOYMENT_START = new Date(2026, 0, 1); // Jan 1 2026
-
 // ─── Drawdown chart (pure SVG, responsive width) ───
 // defenseOnly=true: shows only Cash+XEON+Bonds scaled to those buckets (Fix 13)
 function DrawdownChart({ bucketSeries, transitions, months, isMobile, defenseOnly }) {
@@ -192,7 +190,9 @@ function FreedomView({ state, setState }) {
 
   // ── Section 1: Employment Countdown ──
   const now = new Date();
-  const daysSinceStart = Math.max(0, Math.floor((now - EMPLOYMENT_START) / 86400000));
+  const parsedStart = state.employmentStartDate ? new Date(state.employmentStartDate) : null;
+  const hasEmploymentStart = parsedStart && !isNaN(parsedStart.getTime());
+  const daysSinceStart = hasEmploymentStart ? Math.max(0, Math.floor((now - parsedStart) / 86400000)) : 0;
   const monthsSinceStart = daysSinceStart / 30.44;
   const earnedSinceStart = monthsSinceStart * (state.monthlySalaryEUR || 0);
   const investedSinceStart = monthsSinceStart * Math.max(0, cf.surplusMonthly);
@@ -379,22 +379,26 @@ function FreedomView({ state, setState }) {
       <Card>
         <SectionHeader
           title="Employment tracker"
-          subtitle={`Since Jan 1, 2026 — ${daysSinceStart} days`}
+          subtitle={hasEmploymentStart
+            ? `Since ${parsedStart.toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric" })} — ${daysSinceStart} days`
+            : "Set employment start date in Settings to track progress"}
         />
-        <div style={{ display: "grid", gridTemplateColumns: isDesktop ? "1fr 1fr 1fr" : "1fr", gap: 12, marginBottom: 16 }}>
-          <div style={{ padding: "14px 16px", background: "var(--surface-2)", borderRadius: 12, textAlign: "center" }}>
-            <div style={{ fontSize: 28, fontWeight: 700, color: "var(--fg)", fontFamily: "var(--font-mono)" }}>{daysSinceStart}</div>
-            <div style={{ fontSize: 11, color: "var(--fg-soft)", marginTop: 4 }}>Days employed</div>
+        {hasEmploymentStart && (
+          <div style={{ display: "grid", gridTemplateColumns: isDesktop ? "1fr 1fr 1fr" : "1fr", gap: 12, marginBottom: 16 }}>
+            <div style={{ padding: "14px 16px", background: "var(--surface-2)", borderRadius: 12, textAlign: "center" }}>
+              <div style={{ fontSize: 28, fontWeight: 700, color: "var(--fg)", fontFamily: "var(--font-mono)" }}>{daysSinceStart}</div>
+              <div style={{ fontSize: 11, color: "var(--fg-soft)", marginTop: 4 }}>Days employed</div>
+            </div>
+            <div style={{ padding: "14px 16px", background: "var(--surface-2)", borderRadius: 12, textAlign: "center" }}>
+              <div style={{ fontSize: 28, fontWeight: 700, color: "var(--good)", fontFamily: "var(--font-mono)" }}>{fmtEurK(earnedSinceStart)}</div>
+              <div style={{ fontSize: 11, color: "var(--fg-soft)", marginTop: 4 }}>Gross earned</div>
+            </div>
+            <div style={{ padding: "14px 16px", background: "var(--surface-2)", borderRadius: 12, textAlign: "center" }}>
+              <div style={{ fontSize: 28, fontWeight: 700, color: "var(--accent)", fontFamily: "var(--font-mono)" }}>{fmtEurK(investedSinceStart)}</div>
+              <div style={{ fontSize: 11, color: "var(--fg-soft)", marginTop: 4 }}>Net invested</div>
+            </div>
           </div>
-          <div style={{ padding: "14px 16px", background: "var(--surface-2)", borderRadius: 12, textAlign: "center" }}>
-            <div style={{ fontSize: 28, fontWeight: 700, color: "var(--good)", fontFamily: "var(--font-mono)" }}>{fmtEurK(earnedSinceStart)}</div>
-            <div style={{ fontSize: 11, color: "var(--fg-soft)", marginTop: 4 }}>Gross earned</div>
-          </div>
-          <div style={{ padding: "14px 16px", background: "var(--surface-2)", borderRadius: 12, textAlign: "center" }}>
-            <div style={{ fontSize: 28, fontWeight: 700, color: "var(--accent)", fontFamily: "var(--font-mono)" }}>{fmtEurK(investedSinceStart)}</div>
-            <div style={{ fontSize: 11, color: "var(--fg-soft)", marginTop: 4 }}>Net invested</div>
-          </div>
-        </div>
+        )}
 
         <PrecisionSlider
           label="What would N more months mean?"
