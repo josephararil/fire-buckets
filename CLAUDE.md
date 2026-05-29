@@ -50,7 +50,8 @@ Push to `main` → auto-deploys to GitHub Pages. `.nojekyll` disables Jekyll so 
 - `GK_CONFIG` — Guyton-Klinger parameters: `IWR` 4.0%, `UPPER_GUARDRAIL` 3.2%, `LOWER_GUARDRAIL` 4.8%, `ADJUSTMENT` 10%. No inflation cap — canonical GK 2006 applies the full CPI adjustment (the old 6% cap silently destroyed real purchasing power in 2022).
 - `PHASES` — 6 life phases (`employed`, `coast_fire`, `barista_fire`, `laid_off`, `lean_fire`, `full_fire`), each with bucket allocation `target`, `range`, `floor`, and `floorMonths`. The effective floor is `max(staticFloor, floorMonths × monthlyTotal)`. Phase order in Plan tab: Employed → Coast FIRE → Barista FIRE → Sabbatical → Lean Independence → Full FIRE.
 - `BUCKET_META` — display metadata for the 4 buckets: `growth` (VWCE), `fortress` (XEON), `termShield` (Bonds), `cash` (EUR cash).
-- `TRIGGERS` — 10 event-driven decision rules with urgency levels.
+- `TRIGGERS` — static evergreen decision rules (GK guardrails, bucket health, macro, life events). **No dated personal triggers**: `ga29-dissolution` and `daughter-school` were removed. Portfolio milestone triggers are no longer in this array — they are computed dynamically inside `evaluateTriggers` from the user's own FIRE tiers.
+- `fireTiers(state)` — returns `{ lean, aggressive, recommended, bulletproof }` portfolio target values derived from `deriveCashflow`. Used by `evaluateTriggers` for milestone triggers and exported on `window`.
 - `fmtEur(n)` / `fmtEurK(n)` / `fmtPct(n)` — number formatters.
 
 **GK Engine:**
@@ -127,7 +128,7 @@ Push to `main` → auto-deploys to GitHub Pages. `.nojekyll` disables Jekyll so 
 
 **Freedom** (`freedom.js`) — financial independence scenario modeler. **Mostly read-only** — it visualizes variables from Plan state. The only editable inputs are scenario-specific: the `extraMonths` slider, exit scenario inputs (Section 2), and the partner income toggle/duration in Section 3. All Freedom state is persisted to global state (no local `useState`). The 5 sections are interconnected: exit portfolio flows from Section 2 into Sections 3–5, and monthly gap from Section 3 flows into Section 4. **No eyebrow labels** in Freedom — all section headers are plain. **Sections 2 and 3 are side-by-side in a 2-column grid on desktop** (`isDesktop` via `useViewport`; single column on mobile/tablet). Freedom tab `maxWidth` is `1240` (vs `1080` for other tabs).
 
-- **Section 1: Employment Countdown** — Days since `EMPLOYMENT_START` (Jan 1 2026), EUR earned and invested since start. "N more months" `PrecisionSlider` (0–24) projects additional portfolio using **primary salary surplus only** (excludes partner/side income) with **simple addition** (no compounding): `projectedPortfolio = portfolio + N × max(0, primarySalary − totalExpenses)`. Persisted as `extraMonths`.
+- **Section 1: Employment Countdown** — Days/earned/invested since `state.employmentStartDate` (ISO date, set in Settings). If `employmentStartDate` is empty or invalid, the three "since start" stat boxes are hidden and the subtitle prompts to set the date in Settings. The `extraMonths` projection slider is always shown (it does not depend on the start date). Uses **primary salary surplus only** with **simple addition** (no compounding): `projectedPortfolio = portfolio + N × max(0, primarySalary − totalExpenses)`.
 
 - **Section 2: Exit Scenario Simulator** — Inputs: exit timing (0–24 months out), severance (0–12 months of salary), bonus toggle + amount, unpaid vacation days. All persisted as `exitMonthsOut`, `severanceMonths`, `bonusEnabled`, `bonusAmount`, `vacationDays`. Computes `exitPortfolio = currentPortfolio + (monthsUntilExit × surplusMonthly) + lumpSum`. **Layout**: headline portfolio value, then immediately a **coverage strip** (`1.4fr 1fr 1fr` grid): (a) safe monthly income at 4% IWR, (b) essentials coverage % with EUR gap, (c) full lifestyle coverage % with EUR gap. Then detail row + lump-sum range labelled **"Best case if you negotiate:"** (not "Best/Worst case").
 
@@ -150,8 +151,8 @@ Push to `main` → auto-deploys to GitHub Pages. `.nojekyll` disables Jekyll so 
 ### `script.js` — App shell
 
 - `DEFAULT_STATE` — default values for all persisted keys.
-- `DEFAULT_GIST_ID` — hardcoded fallback Gist ID (`"2b713c829a9a20c576dfa7612035e2ad"`).
-- `SettingsSheet` — slide-up modal for cloud sync (GitHub Gist token + ID, save/load buttons) and local backup (export/import JSON, reset to defaults).
+- `DEFAULT_GIST_ID` — now `""` (empty). The owner's real Gist ID persists in `state.cloudGistId`; there is no longer a hardcoded fallback. The "Use default Gist" button has been removed.
+- `SettingsSheet` — slide-up modal with five sections: **Cloud sync** (GitHub Gist token + ID), **Personal context** (birth years, ECB rate, health insurance, SORR threshold, employment start date), **Custom events** (date-based reminders surfaced in "Decisions ahead"), **Local backup** (export/import JSON), **Danger zone** (reset).
 - `Header` — sticky top bar with app logo and settings button.
 - `App` — root component; owns `state`/`setState` via `usePersistedState`; routes to `TodayView`, `PlanView`, `FreedomView`, `StressView`, `HistoryView`. Tab order: Today · Plan · Freedom · Stress · History. `maxWidth` is `1240` for Freedom tab, `1080` for all others.
 
@@ -221,6 +222,12 @@ Push to `main` → auto-deploys to GitHub Pages. `.nojekyll` disables Jekyll so 
   // Freedom scenario — partner income controls (amount comes from monthlySalaryPartnerEUR)
   partnerIncludedInScenario: true,
   partnerDurScenario: 600,
+
+  // Custom events (date-based reminders shown in Decisions Ahead)
+  customEvents: [],  // [{ id, label, date /* ISO yyyy-mm-dd */, note, urgency? }]
+
+  // Employment start date for Freedom §1 tracker (ISO yyyy-mm-dd, empty = stats hidden)
+  employmentStartDate: "",
 }
 ```
 

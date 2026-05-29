@@ -101,15 +101,7 @@ const BUCKET_META = {
 const URGENCY_ORDER = { immediate: 0, week: 1, month: 2, quarter: 3 };
 
 const TRIGGERS = [
-  // ── Calendar / legal ─────────────────────────────────────────────────────
-  {
-    key: "ga29-dissolution",
-    event: "March 2029 — 29GA dissolution deadline",
-    action: "Sell 29GA on BVME.ETF via directed limit order before December 2029. Do NOT wait for the year-end deadline.",
-    urgency: "immediate",
-    category: "calendar",
-    condition: () => new Date() < new Date("2029-10-01"),
-  },
+  // ── Tax / legal ──────────────────────────────────────────────────────────
   {
     key: "art13-repeal-risk",
     event: "Art. 13 ZDDFL — CGT exemption at risk",
@@ -117,24 +109,6 @@ const TRIGGERS = [
     urgency: "quarter",
     category: "tax",
     condition: () => true,
-  },
-
-  // ── Portfolio milestones ─────────────────────────────────────────────────
-  {
-    key: "milestone-500k",
-    event: "Portfolio approaching €500k",
-    action: "At €500k, split new DCA: 60% VWCE / 40% SPYI or ISAC for provider diversification. Reduces single-broker concentration risk.",
-    urgency: "month",
-    category: "milestone",
-    condition: (_s, d) => d.portfolio >= 450_000 && d.portfolio < 525_000,
-  },
-  {
-    key: "milestone-625k",
-    event: "Portfolio approaching €625k — FIRE-ready zone",
-    action: "Raise Fortress floor → €44k and TermShield → €110k (GK B1/B2 levels). Re-run full GK simulation with updated bucket balances before pulling the trigger.",
-    urgency: "month",
-    category: "milestone",
-    condition: (_s, d) => d.portfolio >= 575_000 && d.portfolio < 650_000,
   },
 
   // ── Employment ───────────────────────────────────────────────────────────
@@ -228,14 +202,6 @@ const TRIGGERS = [
   },
 
   // ── Life events ───────────────────────────────────────────────────────────
-  {
-    key: "daughter-school",
-    event: "Daughter approaching private school age",
-    action: (_s, d) => `Daughter is ${d.daughterAge} — private school costs (~€10–13k/yr) will begin soon. Add to annual expenses and recalculate GK IWR. If the revised WR exceeds ${fmtPct(GK_CONFIG.IWR * 1.2 * 100)}, a 10% withdrawal cut is already required.`,
-    urgency: "month",
-    category: "life",
-    condition: (s, d) => s.daughterBirthYear != null && d.daughterAge !== null && d.daughterAge >= 4 && d.daughterAge <= 8,
-  },
   {
     key: "pension-approaching",
     event: "State pension in ~5 years",
@@ -835,9 +801,21 @@ function monthlyRecommendation(state) {
   return { ...o, mode };
 }
 
+// Returns the four FIRE target portfolio values derived from the user's expense inputs.
+function fireTiers(state) {
+  const cf = deriveCashflow(state);
+  return {
+    lean:        cf.essentials * 12 / 0.045,
+    aggressive:  cf.annualExpenses / 0.04,
+    recommended: cf.annualExpenses / 0.035,
+    bulletproof: cf.annualExpenses / 0.03,
+  };
+}
+
 // ─── Trigger evaluation ───
 // Computes all derived values needed by trigger conditions, then returns the
 // filtered, action-resolved, urgency-sorted list of active triggers.
+// Combines static TRIGGERS, derived milestone triggers, and state.customEvents.
 function evaluateTriggers(state) {
   const cf = deriveCashflow(state);
   const portfolio = (state.bucketVWCE || 0) + (state.bucketXEON || 0) + (state.bucketFixedIncome || 0) + (state.bucketCash || 0);
@@ -856,9 +834,64 @@ function evaluateTriggers(state) {
 
   const derived = { portfolio, inDrawdown, lastReturn, currentWR, age, daughterAge, cashMonths, xeonMonths, yearsInDrawdown };
 
-  return TRIGGERS
+  const staticTriggers = TRIGGERS
     .filter(t => { try { return t.condition(state, derived); } catch { return false; } })
-    .map(t => ({ ...t, action: typeof t.action === "function" ? t.action(state, derived) : t.action }))
+    .map(t => ({ ...t, action: typeof t.action === "function" ? t.action(state, derived) : t.action }));
+
+  // ── Milestone triggers — derived from FIRE tiers, not hardcoded values ──
+  const tiers = fireTiers(state);
+  const tierList = [
+    { key: "lean",        label: "Lean Independence", target: tiers.lean },
+    { key: "aggressive",  label: "Aggressive FIRE",   target: tiers.aggressive },
+    { key: "recommended", label: "Recommended FIRE",  target: tiers.recommended },
+    { key: "bulletproof", label: "Bulletproof FIRE",  target: tiers.bulletproof },
+  ].filter(t => t.target > 0 && Number.isFinite(t.target));
+
+  // Pick the single nearest tier within 10% below; avoids double-firing overlapping bands.
+  const approachingTier = tierList
+    .filter(t => portfolio < t.target && portfolio >= t.target * 0.9)
+    .sort((a, b) => a.target - b.target)[0];
+
+  const milestoneTriggers = [];
+  if (approachingTier && portfolio > 0) {
+    const gap = approachingTier.target - portfolio;
+    milestoneTriggers.push({
+      key: `milestone-${approachingTier.key}`,
+      event: `Approaching ${approachingTier.label} (${fmtEurK(approachingTier.target)})`,
+      action: `Portfolio is ${fmtEurK(gap)} away from your ${approachingTier.label} target. Update bucket floors and re-run the GK simulation as you close in.`,
+      urgency: "month",
+      category: "milestone",
+    });
+  }
+
+  // ── Custom event triggers from state.customEvents ──
+  const todayMs = new Date();
+  todayMs.setHours(0, 0, 0, 0);
+  const customTriggers = [];
+  for (const evt of (state.customEvents || [])) {
+    if (!evt || !evt.date) continue;
+    const evtDate = new Date(evt.date);
+    if (isNaN(evtDate.getTime())) continue;
+    const daysUntil = Math.floor((evtDate - todayMs) / 86400000);
+    if (daysUntil < -14) continue;
+    let urgency = evt.urgency;
+    if (!urgency) {
+      if      (daysUntil <= 30)  urgency = "immediate";
+      else if (daysUntil <= 90)  urgency = "month";
+      else if (daysUntil <= 180) urgency = "quarter";
+      else continue;
+    }
+    const daysLabel = daysUntil >= 0 ? `in ${daysUntil} day${daysUntil === 1 ? "" : "s"}` : `${Math.abs(daysUntil)} day${Math.abs(daysUntil) === 1 ? "" : "s"} ago`;
+    customTriggers.push({
+      key: `custom-${evt.id}`,
+      event: evt.label || "Custom event",
+      action: evt.note || `Coming up ${daysLabel}.`,
+      urgency,
+      category: "custom",
+    });
+  }
+
+  return [...staticTriggers, ...milestoneTriggers, ...customTriggers]
     .sort((a, b) => (URGENCY_ORDER[a.urgency] ?? 99) - (URGENCY_ORDER[b.urgency] ?? 99));
 }
 
@@ -1010,7 +1043,7 @@ Object.assign(window, {
   sampleCorrelatedPaths, sampleReturnPath, sampleInflationPath, gaussianSample,
   deriveCashflow, nextRebalanceBucket, monthlyRecommendation, monthlyOutlook,
   effectiveFloor, effectiveLastWithdrawal,
-  evaluateTriggers, monthsToTarget, realMonthlyRate, simulateAffordability,
+  evaluateTriggers, fireTiers, monthsToTarget, realMonthlyRate, simulateAffordability,
   loadState, saveState, loadFromGist, saveToGist, GIST_FILENAME,
 });
 
