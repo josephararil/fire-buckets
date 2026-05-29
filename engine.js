@@ -101,15 +101,7 @@ const BUCKET_META = {
 const URGENCY_ORDER = { immediate: 0, week: 1, month: 2, quarter: 3 };
 
 const TRIGGERS = [
-  // ── Calendar / legal ─────────────────────────────────────────────────────
-  {
-    key: "ga29-dissolution",
-    event: "March 2029 — 29GA dissolution deadline",
-    action: "Sell 29GA on BVME.ETF via directed limit order before December 2029. Do NOT wait for the year-end deadline.",
-    urgency: "immediate",
-    category: "calendar",
-    condition: () => new Date() < new Date("2029-10-01"),
-  },
+  // ── Tax / legal ──────────────────────────────────────────────────────────
   {
     key: "art13-repeal-risk",
     event: "Art. 13 ZDDFL — CGT exemption at risk",
@@ -117,24 +109,6 @@ const TRIGGERS = [
     urgency: "quarter",
     category: "tax",
     condition: () => true,
-  },
-
-  // ── Portfolio milestones ─────────────────────────────────────────────────
-  {
-    key: "milestone-500k",
-    event: "Portfolio approaching €500k",
-    action: "At €500k, split new DCA: 60% VWCE / 40% SPYI or ISAC for provider diversification. Reduces single-broker concentration risk.",
-    urgency: "month",
-    category: "milestone",
-    condition: (_s, d) => d.portfolio >= 450_000 && d.portfolio < 525_000,
-  },
-  {
-    key: "milestone-625k",
-    event: "Portfolio approaching €625k — FIRE-ready zone",
-    action: "Raise Fortress floor → €44k and TermShield → €110k (GK B1/B2 levels). Re-run full GK simulation with updated bucket balances before pulling the trigger.",
-    urgency: "month",
-    category: "milestone",
-    condition: (_s, d) => d.portfolio >= 575_000 && d.portfolio < 650_000,
   },
 
   // ── Employment ───────────────────────────────────────────────────────────
@@ -228,14 +202,6 @@ const TRIGGERS = [
   },
 
   // ── Life events ───────────────────────────────────────────────────────────
-  {
-    key: "daughter-school",
-    event: "Daughter approaching private school age",
-    action: (_s, d) => `Daughter is ${d.daughterAge} — private school costs (~€10–13k/yr) will begin soon. Add to annual expenses and recalculate GK IWR. If the revised WR exceeds ${fmtPct(GK_CONFIG.IWR * 1.2 * 100)}, a 10% withdrawal cut is already required.`,
-    urgency: "month",
-    category: "life",
-    condition: (s, d) => s.daughterBirthYear != null && d.daughterAge !== null && d.daughterAge >= 4 && d.daughterAge <= 8,
-  },
   {
     key: "pension-approaching",
     event: "State pension in ~5 years",
@@ -835,9 +801,21 @@ function monthlyRecommendation(state) {
   return { ...o, mode };
 }
 
+// Returns the four FIRE target portfolio values derived from the user's expense inputs.
+function fireTiers(state) {
+  const cf = deriveCashflow(state);
+  return {
+    lean:        cf.essentials * 12 / 0.045,
+    aggressive:  cf.annualExpenses / 0.04,
+    recommended: cf.annualExpenses / 0.035,
+    bulletproof: cf.annualExpenses / 0.03,
+  };
+}
+
 // ─── Trigger evaluation ───
 // Computes all derived values needed by trigger conditions, then returns the
 // filtered, action-resolved, urgency-sorted list of active triggers.
+// Combines static TRIGGERS, derived milestone triggers, and state.customEvents.
 function evaluateTriggers(state) {
   const cf = deriveCashflow(state);
   const portfolio = (state.bucketVWCE || 0) + (state.bucketXEON || 0) + (state.bucketFixedIncome || 0) + (state.bucketCash || 0);
@@ -856,9 +834,64 @@ function evaluateTriggers(state) {
 
   const derived = { portfolio, inDrawdown, lastReturn, currentWR, age, daughterAge, cashMonths, xeonMonths, yearsInDrawdown };
 
-  return TRIGGERS
+  const staticTriggers = TRIGGERS
     .filter(t => { try { return t.condition(state, derived); } catch { return false; } })
-    .map(t => ({ ...t, action: typeof t.action === "function" ? t.action(state, derived) : t.action }))
+    .map(t => ({ ...t, action: typeof t.action === "function" ? t.action(state, derived) : t.action }));
+
+  // ── Milestone triggers — derived from FIRE tiers, not hardcoded values ──
+  const tiers = fireTiers(state);
+  const tierList = [
+    { key: "lean",        label: "Lean Independence", target: tiers.lean },
+    { key: "aggressive",  label: "Aggressive FIRE",   target: tiers.aggressive },
+    { key: "recommended", label: "Recommended FIRE",  target: tiers.recommended },
+    { key: "bulletproof", label: "Bulletproof FIRE",  target: tiers.bulletproof },
+  ].filter(t => t.target > 0 && Number.isFinite(t.target));
+
+  // Pick the single nearest tier within 10% below; avoids double-firing overlapping bands.
+  const approachingTier = tierList
+    .filter(t => portfolio < t.target && portfolio >= t.target * 0.9)
+    .sort((a, b) => a.target - b.target)[0];
+
+  const milestoneTriggers = [];
+  if (approachingTier && portfolio > 0) {
+    const gap = approachingTier.target - portfolio;
+    milestoneTriggers.push({
+      key: `milestone-${approachingTier.key}`,
+      event: `Approaching ${approachingTier.label} (${fmtEurK(approachingTier.target)})`,
+      action: `Portfolio is ${fmtEurK(gap)} away from your ${approachingTier.label} target. Update bucket floors and re-run the GK simulation as you close in.`,
+      urgency: "month",
+      category: "milestone",
+    });
+  }
+
+  // ── Custom event triggers from state.customEvents ──
+  const todayMs = new Date();
+  todayMs.setHours(0, 0, 0, 0);
+  const customTriggers = [];
+  for (const evt of (state.customEvents || [])) {
+    if (!evt || !evt.date) continue;
+    const evtDate = new Date(evt.date);
+    if (isNaN(evtDate.getTime())) continue;
+    const daysUntil = Math.floor((evtDate - todayMs) / 86400000);
+    if (daysUntil < -14) continue;
+    let urgency = evt.urgency;
+    if (!urgency) {
+      if      (daysUntil <= 30)  urgency = "immediate";
+      else if (daysUntil <= 90)  urgency = "month";
+      else if (daysUntil <= 180) urgency = "quarter";
+      else continue;
+    }
+    const daysLabel = daysUntil >= 0 ? `in ${daysUntil} day${daysUntil === 1 ? "" : "s"}` : `${Math.abs(daysUntil)} day${Math.abs(daysUntil) === 1 ? "" : "s"} ago`;
+    customTriggers.push({
+      key: `custom-${evt.id}`,
+      event: evt.label || "Custom event",
+      action: evt.note || `Coming up ${daysLabel}.`,
+      urgency,
+      category: "custom",
+    });
+  }
+
+  return [...staticTriggers, ...milestoneTriggers, ...customTriggers]
     .sort((a, b) => (URGENCY_ORDER[a.urgency] ?? 99) - (URGENCY_ORDER[b.urgency] ?? 99));
 }
 
@@ -916,6 +949,92 @@ function monthsToTarget(portfolio, target, monthlySurplus, realReturnMonthly) {
   const n = Math.log(numerator / denominator) / Math.log(1 + r);
   return Number.isFinite(n) && n > 0 && n <= 600 ? Math.ceil(n) : Infinity;
 }
+
+function realMonthlyRate(state) {
+  const nominal = (state.gkNominalReturn || 7.0) / 100;
+  const inf     = (state.gkInflation    || 2.0) / 100;
+  const real    = (1 + nominal) / (1 + inf) - 1;
+  return Math.pow(1 + real, 1 / 12) - 1;
+}
+
+function simulateAffordability(state, { funDelta = 0, essentialsDelta = 0, oneOff = 0, exitPortfolio = null } = {}) {
+  const cf       = deriveCashflow(state);
+  const portfolio = (state.bucketVWCE || 0) + (state.bucketXEON || 0) + (state.bucketFixedIncome || 0) + (state.bucketCash || 0);
+  const exitPort  = exitPortfolio !== null ? exitPortfolio : portfolio;
+  const r         = realMonthlyRate(state);
+
+  // ── Before ────────────────────────────────────────────────────────────────
+  const bMonthlyExp = cf.totalExpenses;
+  const bAnnualExp  = cf.annualExpenses;
+  const bSurplus    = cf.surplusMonthly;
+  const bFireTarget = bAnnualExp / GK_CONFIG.IWR;
+  const bMonths     = monthsToTarget(portfolio, bFireTarget, bSurplus, r);
+  const bExitWR     = exitPort > 0 ? (bAnnualExp / exitPort) * 100 : 0;
+  const bExitZone   = getGKZone(bExitWR);
+
+  const before = {
+    monthlyExpenses: bMonthlyExp,
+    annualExpenses:  bAnnualExp,
+    surplusMonthly:  bSurplus,
+    fireTarget:      bFireTarget,
+    monthsToFire:    bMonths,
+    exitWR:          bExitWR,
+    exitZone:        bExitZone,
+  };
+
+  // ── After (recurring change) ───────────────────────────────────────────────
+  const aMonthlyExp = bMonthlyExp + funDelta + essentialsDelta;
+  const aAnnualExp  = aMonthlyExp * 12;
+  const aSurplus    = cf.incomeMonthly - aMonthlyExp;
+  const aFireTarget = aAnnualExp / GK_CONFIG.IWR;
+  const aMonths     = monthsToTarget(portfolio, aFireTarget, aSurplus, r);
+  const aExitWR     = exitPort > 0 ? (aAnnualExp / exitPort) * 100 : 0;
+  const aExitZone   = getGKZone(aExitWR);
+
+  const after = {
+    monthlyExpenses: aMonthlyExp,
+    annualExpenses:  aAnnualExp,
+    surplusMonthly:  aSurplus,
+    fireTarget:      aFireTarget,
+    monthsToFire:    aMonths,
+    exitWR:          aExitWR,
+    exitZone:        aExitZone,
+  };
+
+  // One-off delay (independent of recurring delta)
+  const oneOffMonths = (oneOff > 0 && bSurplus > 0)
+    ? Math.ceil(oneOff / bSurplus)
+    : (oneOff > 0 ? Infinity : 0);
+
+  // Delta months (recurring only)
+  const deltaMonths = (Number.isFinite(aMonths) && Number.isFinite(bMonths))
+    ? aMonths - bMonths
+    : (!Number.isFinite(aMonths) && !Number.isFinite(bMonths)) ? 0 : Infinity;
+
+  // ── Verdict ────────────────────────────────────────────────────────────────
+  const ZONE_ORDER   = ["covered", "prosperity", "safe", "elevated", "cut"];
+  const bZoneIdx     = ZONE_ORDER.indexOf(bExitZone.id);
+  const aZoneIdx     = ZONE_ORDER.indexOf(aExitZone.id);
+  const zoneWorsened = aZoneIdx > bZoneIdx;
+
+  let tone, headline, text;
+  if (aExitZone.id === "cut" || aExitZone.id === "elevated") {
+    tone = "bad"; headline = "No.";
+    text = `At ${fmtEur(aMonthlyExp)}/mo, exit WR is ${aExitWR.toFixed(1)}% (${aExitZone.label}) — outside safe-withdrawal range.`;
+  } else if ((Number.isFinite(deltaMonths) && deltaMonths > 12) || zoneWorsened) {
+    tone = "warn"; headline = "Careful.";
+    const dtText = Number.isFinite(deltaMonths) && deltaMonths !== 0
+      ? ` FIRE moves ${deltaMonths > 0 ? "+" : ""}${Math.round(deltaMonths)} months.` : "";
+    text = `Exit WR ${aExitWR.toFixed(1)}% (${aExitZone.label}).${dtText}`;
+  } else {
+    tone = "good"; headline = "Fine.";
+    const dtText = Number.isFinite(deltaMonths) && deltaMonths !== 0
+      ? ` FIRE moves ${deltaMonths > 0 ? "+" : ""}${Math.round(deltaMonths)} months.` : " No change to timeline.";
+    text = `Exit WR ${aExitWR.toFixed(1)}% stays in the ${aExitZone.label} zone.${dtText}`;
+  }
+
+  return { before, after, deltaMonths, oneOffMonths, verdict: { tone, headline, text } };
+
 
 function buildAIContext(state) {
   const cf = deriveCashflow(state);
@@ -976,12 +1095,12 @@ Object.assign(window, {
   sampleCorrelatedPaths, sampleReturnPath, sampleInflationPath, gaussianSample,
   deriveCashflow, nextRebalanceBucket, monthlyRecommendation, monthlyOutlook,
   effectiveFloor, effectiveLastWithdrawal,
-  evaluateTriggers, monthsToTarget, buildAIContext,
+  evaluateTriggers, fireTiers, monthsToTarget, realMonthlyRate, simulateAffordability, buildAIContext,
   loadState, saveState, loadFromGist, saveToGist, GIST_FILENAME,
 });
 
 window.__FIRE_TESTS__ = {
   calcGKNextStep, runGKSimulation, runMonteCarlo,
   sampleCorrelatedPaths, sampleReturnPath, sampleInflationPath, gaussianSample,
-  GK_CONFIG, PHASES,
+  GK_CONFIG, PHASES, simulateAffordability, realMonthlyRate,
 };

@@ -30,9 +30,9 @@ Load order in `index.html`: `engine.js` → `ui.js` → `today.js` → `plan.js`
 
 ## Deployment
 
-Push to `main` → auto-deploys to GitHub Pages. `.nojekyll` disables Jekyll so static files are served as-is.
+Push to `main` → auto-deploys to GitHub Pages. `.nojekyll` disables Jekyll so static files are served as-is. Always push to feature branch, so user has the ability to raise PRs against main.
 
-**After any change, bump `APP_VERSION` in `engine.js` AND `SW_VERSION` in `sw.js`** (format: `YYYYMMDD.N`, e.g. `"20260508.0"`). The two strings must stay in sync — they live in separate execution contexts. Bumping only one does not invalidate the cache.
+**After any change, bump `APP_VERSION` in `engine.js` AND `SW_VERSION` in `sw.js`** (format: `YYYYMMDD.N`, e.g. `"20260508.0"`). The two strings must stay in sync — they live in separate execution contexts. Bumping only one does not invalidate the cache. Current version: `"20260529.0"`.
 
 ## GitHub CLI
 
@@ -50,7 +50,8 @@ Push to `main` → auto-deploys to GitHub Pages. `.nojekyll` disables Jekyll so 
 - `GK_CONFIG` — Guyton-Klinger parameters: `IWR` 4.0%, `UPPER_GUARDRAIL` 3.2%, `LOWER_GUARDRAIL` 4.8%, `ADJUSTMENT` 10%. No inflation cap — canonical GK 2006 applies the full CPI adjustment (the old 6% cap silently destroyed real purchasing power in 2022).
 - `PHASES` — 6 life phases (`employed`, `coast_fire`, `barista_fire`, `laid_off`, `lean_fire`, `full_fire`), each with bucket allocation `target`, `range`, `floor`, and `floorMonths`. The effective floor is `max(staticFloor, floorMonths × monthlyTotal)`. Phase order in Plan tab: Employed → Coast FIRE → Barista FIRE → Sabbatical → Lean Independence → Full FIRE.
 - `BUCKET_META` — display metadata for the 4 buckets: `growth` (VWCE), `fortress` (XEON), `termShield` (Bonds), `cash` (EUR cash).
-- `TRIGGERS` — 10 event-driven decision rules with urgency levels.
+- `TRIGGERS` — static evergreen decision rules (GK guardrails, bucket health, macro, life events). **No dated personal triggers**: `ga29-dissolution` and `daughter-school` were removed. Portfolio milestone triggers are no longer in this array — they are computed dynamically inside `evaluateTriggers` from the user's own FIRE tiers.
+- `fireTiers(state)` — returns `{ lean, aggressive, recommended, bulletproof }` portfolio target values derived from `deriveCashflow`. Used by `evaluateTriggers` for milestone triggers and exported on `window`.
 - `fmtEur(n)` / `fmtEurK(n)` / `fmtPct(n)` — number formatters.
 
 **GK Engine:**
@@ -75,6 +76,8 @@ Push to `main` → auto-deploys to GitHub Pages. `.nojekyll` disables Jekyll so 
 - `effectiveFloor(bucketCfg, monthlyTotal)` — `max(staticFloor, floorMonths × monthlyTotal)`.
 - `effectiveLastWithdrawal(state)` — returns the most recent `gkHistory.finalWithdrawal` if available; otherwise `0` when accumulating (surplus ≥ 0) and `annualExpenses` only when actively drawing. Replaces the older "always default to `annualExpenses`" fallback, which produced a phantom Cut-zone WR while employed.
 - `nextRebalanceBucket(state)` — returns `{ underweight, overweight }`. `underweight` is the most pressing bucket to add money to (floor deficit > %-allocation deficit), with `floor`, `floorMonths`, `targetPct`, and `range` fields so the UI can explain the choice. `overweight` is the most-overweight bucket beyond its range upper (with a 0.5%-of-portfolio noise tolerance), or `null`.
+- `realMonthlyRate(state)` — Fisher-equation real return converted to a monthly rate: `(1+nominal)/(1+inflation)−1` annualised, then `(1+real)^(1/12)−1`. Used by `simulateAffordability` and `TodayView` (replaces the inline computation that was duplicated there).
+- `simulateAffordability(state, { funDelta, essentialsDelta, oneOff, exitPortfolio })` → `{ before, after, deltaMonths, oneOffMonths, verdict }` — sandbox spending-impact engine. Computes before/after in terms of `monthlyExpenses`, `annualExpenses`, `surplusMonthly`, `fireTarget`, `monthsToFire`, `exitWR`, `exitZone`. One-off is modelled as `ceil(oneOff / surplusMonthly)` months added to `before.monthsToFire` (doesn't change fireTarget). `verdict = { tone, headline, text }`: `bad`/"No." if after zone is elevated/cut; `warn`/"Careful." if deltaMonths > 12 or zone worsened; else `good`/"Fine."
 - `monthlyOutlook(state)` — structured monthly plan with three modes: `"accumulating"` (surplus ≥ 0 and either no GK history or still in an earning phase — `employed` / `coast_fire` / `barista_fire`), `"lean_drawdown"` (small shortfall fully covered by trimming fun), `"shortfall"` (draw required, with cascade source Cash → XEON → Bonds → VWCE). Returns `{ mode, primary: { verb, amount, bucketKey, meta, reason }, secondary: [...], floorContext, headline, subtitle, ... }`. In `accumulating` mode, `funCut` is always 0 (the prior zone-based fun-budget holdback was wrong for employed users not drawing from the portfolio). Secondary actions include `rebalance_out` (flag overweight buckets), `fun_trim`, `xeon_low`, `cgt`.
 - `monthlyRecommendation(state)` — thin alias for `monthlyOutlook` kept for back-compat; remaps `mode: "accumulating"` to `"surplus"`.
 
@@ -98,12 +101,13 @@ Push to `main` → auto-deploys to GitHub Pages. `.nojekyll` disables Jekyll so 
 1. **Hero** — `ProgressRing` rebased to **Bulletproof FIRE as 100%** (not Aggressive), so the ring is a true journey map. Four milestone ticks drawn on the ring arc at their proportional positions. Portfolio total, gap-to-FIRE sentence (3-way branch: crossed / finite pace / no-surplus). `MilestoneJourney` SVG bar below the sentence: horizontal track with milestone dots + user pin + "Next milestone: X in Y" headline. No coverage cards in the hero.
 2. **GK zone ribbon** (`GKZoneRibbon`) — **only rendered when `outlook.mode !== "accumulating"`**, placed **directly under the hero** with `tone="accent"` for visual weight. WR marker is white-fill + colored ring. Rationale shows concrete €amounts. `currentAnnual` and `proposedAnnual` props.
 3. **Portfolio capacity today** (`PortfolioCapacityCard`) — safe monthly income shown big once (€/mo + €/yr at 4% IWR), then `CoverageBar` for Essentials and Full lifestyle (% + gap + inline progress bar). Tone-coded: good/warn/bad.
-4. **This Month** (`ThisMonthCard`) — action card. Mode pill top-right. Cashflow chip strip. Primary action block with bucket-color border, Why/After rationale. Floor tracker when floor-driven. Secondary rows: `rebalance_out`, `fun_trim`, `xeon_low`, `cgt`.
-5. **FIRE milestones** — compact `MilestoneRow` per tier (dot + name + WR badge + 80px mini-bar + months right-aligned). Lean FIRE caution shrunk to `⚠` tooltip (`title` attribute). "If contributions stopped tomorrow" footnote in a `Disclosure` (collapsed by default).
-6. **Runway + Allocation** two-up:
+4. **Affordability sandbox** (`AffordabilityCard`) — what-if spending card placed immediately after portfolio capacity. `NumberField` for fun budget (seeded from `state.monthlyFunEUR`) + preset chips (+€100, +€200, €5k one-off) + Reset. Calls `simulateAffordability` on every change. Shows tone-colored verdict (headline + sentence), then a two-column before→after grid: FIRE date, target, exit WR pill, ±months delta. "Apply to Plan" button updates `monthlyFunEUR` in state (only shown for recurring fun changes, not for one-offs). **Never auto-mutates state** — sandbox only until Apply is clicked.
+5. **This Month** (`ThisMonthCard`) — action card. Mode pill top-right. Cashflow chip strip. Primary action block with bucket-color border, Why/After rationale. Floor tracker when floor-driven. Secondary rows: `rebalance_out`, `fun_trim`, `xeon_low`, `cgt`.
+6. **FIRE milestones** — compact `MilestoneRow` per tier (dot + name + WR badge + 80px mini-bar + months right-aligned). Lean FIRE caution shrunk to `⚠` tooltip (`title` attribute). "If contributions stopped tomorrow" footnote in a `Disclosure` (collapsed by default).
+7. **Runway + Allocation** two-up:
    - **Runway**: `safeRunwayMonths` = (XEON + Cash + Bonds) / monthlyExpenses (all 3 defense buckets, not just Safety+Cash). `RunwayStackedBar` shows Cash / Safety / Stability segments proportional to months, with hatched Growth tail. Axis labels below. Chips removed.
    - **Allocation**: donut + drift rows with `|drift| ≥ 1.5 pp` Pill badges. Rebalance hint appended when any bucket drifts ≥ 3 pp.
-7. **Decisions ahead** — sorted by urgency (`immediate > week > month > quarter`). Top 2 shown inline via `TriggerRow`. Remaining hidden in `Disclosure` ("Show N more"). `TriggerRow` is a module-level helper component.
+8. **Decisions ahead** — sorted by urgency (`immediate > week > month > quarter`). Top 2 shown inline via `TriggerRow`. Remaining hidden in `Disclosure` ("Show N more"). `TriggerRow` is a module-level helper component.
 
 `fmtMonths(n)` and `fmtETA(n)` are **module-level** helpers (not inside `TodayView`) — shared by `MilestoneJourney`, `MilestoneRow`, and `TodayView`.
 
@@ -111,7 +115,7 @@ Push to `main` → auto-deploys to GitHub Pages. `.nojekyll` disables Jekyll so 
 
 `ringProgress = portfolio / bulletproofTarget` drives the ring arc and label. `progress = portfolio / fireTarget` (Aggressive) drives the hero sentence logic only.
 
-`monthsToTarget(portfolio, target, monthlySurplus, realReturnMonthly)` — standalone pure function in `engine.js` (exported to `window`). Uses the closed-form FV formula `n = ln((F·r + c) / (P·r + c)) / ln(1+r)` with **geometric monthly rate** `r = (1 + realReturn)^(1/12) − 1` (not nominal `r/12`). Guards negative denominators to return `Infinity`. Used by both Today and Freedom tabs.
+`monthsToTarget(portfolio, target, monthlySurplus, realReturnMonthly)` — standalone pure function in `engine.js` (exported to `window`). Uses the closed-form FV formula `n = ln((F·r + c) / (P·r + c)) / ln(1+r)` with **geometric monthly rate** `r = (1 + realReturn)^(1/12) − 1` (not nominal `r/12`). Guards negative denominators to return `Infinity`. Used by Today, Freedom, and `simulateAffordability`. The inline duplicate that previously lived in `TodayView` has been removed — all callers now use this engine version.
 
 `buildAIContext(state)` — exported on `window`. Builds the compact text prompt for Gemini: system instruction, portfolio/bucket breakdown, cashflow from `deriveCashflow`, all four FIRE tier targets (Lean 4.5% / Aggressive 4% / Recommended 3.5% / Bulletproof 3%), current WR + `getGKZone` label, phase label, `monthlyOutlook` headline, and up to 5 active triggers from `evaluateTriggers`. Used exclusively by `AskCompass`.
 
@@ -126,7 +130,7 @@ Push to `main` → auto-deploys to GitHub Pages. `.nojekyll` disables Jekyll so 
 
 **Freedom** (`freedom.js`) — financial independence scenario modeler. **Mostly read-only** — it visualizes variables from Plan state. The only editable inputs are scenario-specific: the `extraMonths` slider, exit scenario inputs (Section 2), and the partner income toggle/duration in Section 3. All Freedom state is persisted to global state (no local `useState`). The 5 sections are interconnected: exit portfolio flows from Section 2 into Sections 3–5, and monthly gap from Section 3 flows into Section 4. **No eyebrow labels** in Freedom — all section headers are plain. **Sections 2 and 3 are side-by-side in a 2-column grid on desktop** (`isDesktop` via `useViewport`; single column on mobile/tablet). Freedom tab `maxWidth` is `1240` (vs `1080` for other tabs).
 
-- **Section 1: Employment Countdown** — Days since `EMPLOYMENT_START` (Jan 1 2026), EUR earned and invested since start. "N more months" `PrecisionSlider` (0–24) projects additional portfolio using **primary salary surplus only** (excludes partner/side income) with **simple addition** (no compounding): `projectedPortfolio = portfolio + N × max(0, primarySalary − totalExpenses)`. Persisted as `extraMonths`.
+- **Section 1: Employment Countdown** — Days/earned/invested since `state.employmentStartDate` (ISO date, set in Settings). If `employmentStartDate` is empty or invalid, the three "since start" stat boxes are hidden and the subtitle prompts to set the date in Settings. The `extraMonths` projection slider is always shown (it does not depend on the start date). Uses **primary salary surplus only** with **simple addition** (no compounding): `projectedPortfolio = portfolio + N × max(0, primarySalary − totalExpenses)`.
 
 - **Section 2: Exit Scenario Simulator** — Inputs: exit timing (0–24 months out), severance (0–12 months of salary), bonus toggle + amount, unpaid vacation days. All persisted as `exitMonthsOut`, `severanceMonths`, `bonusEnabled`, `bonusAmount`, `vacationDays`. Computes `exitPortfolio = currentPortfolio + (monthsUntilExit × surplusMonthly) + lumpSum`. **Layout**: headline portfolio value, then immediately a **coverage strip** (`1.4fr 1fr 1fr` grid): (a) safe monthly income at 4% IWR, (b) essentials coverage % with EUR gap, (c) full lifestyle coverage % with EUR gap. Then detail row + lump-sum range labelled **"Best case if you negotiate:"** (not "Best/Worst case").
 
@@ -149,9 +153,9 @@ Push to `main` → auto-deploys to GitHub Pages. `.nojekyll` disables Jekyll so 
 ### `script.js` — App shell
 
 - `DEFAULT_STATE` — default values for all persisted keys.
-- `DEFAULT_GIST_ID` — hardcoded fallback Gist ID (`"2b713c829a9a20c576dfa7612035e2ad"`).
+- `DEFAULT_GIST_ID` — now `""` (empty). The owner's real Gist ID persists in `state.cloudGistId`; there is no longer a hardcoded fallback. The "Use default Gist" button has been removed.
 - `GEMINI_MODEL` — top-level constant `"gemini-2.5-flash"` (easy to swap if the model name changes).
-- `SettingsSheet` — slide-up modal for cloud sync (GitHub Gist token + ID, save/load buttons), **AI assistant** (Gemini API key field, `type="password"`, stored device-only), personal context, local backup, and danger zone.
+- `SettingsSheet` — slide-up modal with six sections: **Cloud sync** (GitHub Gist token + ID), **AI assistant** (Gemini API key field, `type="password"`, stored device-only), **Personal context** (birth years, ECB rate, health insurance, SORR threshold, employment start date), **Custom events** (date-based reminders surfaced in "Decisions ahead"), **Local backup** (export/import JSON), **Danger zone** (reset).
 - `AskCompass` — Sheet panel for free-form AI questions. Opens from the sparkle button in `Header`. Shows disabled state with hint when `geminiApiKey` is empty; otherwise shows suggestion chips, a text input, and a Gemini answer rendered with `whiteSpace: pre-wrap`. Fetches `POST https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`. Wraps all errors in an inline message; never throws uncaught.
 - `Header` — sticky top bar with app logo, sparkle (Ask Compass) button, and settings button.
 - `App` — root component; owns `state`/`setState` via `usePersistedState`; routes to `TodayView`, `PlanView`, `FreedomView`, `StressView`, `HistoryView`. Tab order: Today · Plan · Freedom · Stress · History. `maxWidth` is `1240` for Freedom tab, `1080` for all others.
@@ -223,6 +227,12 @@ Push to `main` → auto-deploys to GitHub Pages. `.nojekyll` disables Jekyll so 
   partnerIncludedInScenario: true,
   partnerDurScenario: 600,
 
+  // Custom events (date-based reminders shown in Decisions Ahead)
+  customEvents: [],  // [{ id, label, date /* ISO yyyy-mm-dd */, note, urgency? }]
+
+  // Employment start date for Freedom §1 tracker (ISO yyyy-mm-dd, empty = stats hidden)
+  employmentStartDate: "",
+
   // AI assistant — never synced to Gist (omitted by saveToGist OMIT_KEYS)
   geminiApiKey: "",
 }
@@ -256,7 +266,7 @@ CDN detection is handled by `isCdn(url)` checking `url.hostname` against `CDN_OR
 
 ### Tests (`tests.html`)
 
-Open in browser. `engine.js` exposes `window.__FIRE_TESTS__` with `{ calcGKNextStep, runGKSimulation, runMonteCarlo, sampleCorrelatedPaths, sampleReturnPath, sampleInflationPath, gaussianSample, GK_CONFIG, PHASES }`. Tests render pass/fail counts in-page.
+Open in browser. Loads the full script stack (engine.js → … → script.js) in the same order as `index.html`. `engine.js` exposes `window.__FIRE_TESTS__` with `{ calcGKNextStep, runGKSimulation, runMonteCarlo, sampleCorrelatedPaths, sampleReturnPath, sampleInflationPath, gaussianSample, GK_CONFIG, PHASES, simulateAffordability, realMonthlyRate }`. Tests render pass/fail counts in-page.
 
 ## Key Conventions
 
