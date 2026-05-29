@@ -19,8 +19,8 @@ The app is split across several `<script type="text/babel">` files loaded in ord
 | `freedom.js` | **Freedom** tab — financial independence scenario modeler |
 | `stress.js` | **Stress** tab — linear projection + Monte Carlo |
 | `history.js` | **History** tab — annual GK log |
-| `script.js` | App shell — `SettingsSheet`, `Header`, `App` root, `ReactDOM.createRoot` |
-| `sw.js` | Service Worker (stale-while-revalidate) |
+| `script.js` | App shell — `SettingsSheet`, `AskCompass`, `Header`, `App` root, `ReactDOM.createRoot` |
+| `sw.js` | Service Worker (network-first for app files; cache-first for CDN) |
 
 Load order in `index.html`: `engine.js` → `ui.js` → `today.js` → `plan.js` → `freedom.js` → `stress.js` → `history.js` → `script.js`.
 
@@ -113,6 +113,8 @@ Push to `main` → auto-deploys to GitHub Pages. `.nojekyll` disables Jekyll so 
 
 `monthsToTarget(portfolio, target, monthlySurplus, realReturnMonthly)` — standalone pure function in `engine.js` (exported to `window`). Uses the closed-form FV formula `n = ln((F·r + c) / (P·r + c)) / ln(1+r)` with **geometric monthly rate** `r = (1 + realReturn)^(1/12) − 1` (not nominal `r/12`). Guards negative denominators to return `Infinity`. Used by both Today and Freedom tabs.
 
+`buildAIContext(state)` — exported on `window`. Builds the compact text prompt for Gemini: system instruction, portfolio/bucket breakdown, cashflow from `deriveCashflow`, all four FIRE tier targets (Lean 4.5% / Aggressive 4% / Recommended 3.5% / Bulletproof 3%), current WR + `getGKZone` label, phase label, `monthlyOutlook` headline, and up to 5 active triggers from `evaluateTriggers`. Used exclusively by `AskCompass`.
+
 **Plan** (`plan.js`) — strategy inputs. This is the **single source of truth** for all financial variables. Today and Freedom are visualization-only dashboards; Plan is where numbers are entered.
 - **Phase selector** — `PhaseBadge` buttons with active state: accent border + glow + dot indicator + accent-colored text on the active phase. (3×2 grid on mobile, 3-column on desktop for 6 phases; switches `currentPhase`; switching to `laid_off` zeros primary salary.)
 - Bucket balance editors (`NumberField` for VWCE, XEON, Bonds, Cash).
@@ -148,8 +150,10 @@ Push to `main` → auto-deploys to GitHub Pages. `.nojekyll` disables Jekyll so 
 
 - `DEFAULT_STATE` — default values for all persisted keys.
 - `DEFAULT_GIST_ID` — hardcoded fallback Gist ID (`"2b713c829a9a20c576dfa7612035e2ad"`).
-- `SettingsSheet` — slide-up modal for cloud sync (GitHub Gist token + ID, save/load buttons) and local backup (export/import JSON, reset to defaults).
-- `Header` — sticky top bar with app logo and settings button.
+- `GEMINI_MODEL` — top-level constant `"gemini-2.5-flash"` (easy to swap if the model name changes).
+- `SettingsSheet` — slide-up modal for cloud sync (GitHub Gist token + ID, save/load buttons), **AI assistant** (Gemini API key field, `type="password"`, stored device-only), personal context, local backup, and danger zone.
+- `AskCompass` — Sheet panel for free-form AI questions. Opens from the sparkle button in `Header`. Shows disabled state with hint when `geminiApiKey` is empty; otherwise shows suggestion chips, a text input, and a Gemini answer rendered with `whiteSpace: pre-wrap`. Fetches `POST https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`. Wraps all errors in an inline message; never throws uncaught.
+- `Header` — sticky top bar with app logo, sparkle (Ask Compass) button, and settings button.
 - `App` — root component; owns `state`/`setState` via `usePersistedState`; routes to `TodayView`, `PlanView`, `FreedomView`, `StressView`, `HistoryView`. Tab order: Today · Plan · Freedom · Stress · History. `maxWidth` is `1240` for Freedom tab, `1080` for all others.
 
 ### State (localStorage key: `"harari-dashboard-state"`)
@@ -218,6 +222,9 @@ Push to `main` → auto-deploys to GitHub Pages. `.nojekyll` disables Jekyll so 
   // Freedom scenario — partner income controls (amount comes from monthlySalaryPartnerEUR)
   partnerIncludedInScenario: true,
   partnerDurScenario: 600,
+
+  // AI assistant — never synced to Gist (omitted by saveToGist OMIT_KEYS)
+  geminiApiKey: "",
 }
 ```
 
@@ -231,6 +238,7 @@ Key variable notes:
 - `currentPhase: "lean_fire"` — labelled "Lean Independence" in UI. Essentials-only from portfolio, no income required.
 - `bgCgtRatePct` — Bulgarian law (Art. 13 ZDDFL) exempts UCITS ETFs traded on regulated EU/EEA markets (VWCE, XEON on Xetra) from CGT entirely. Default is 0%. The 10% option covers non-exempt instruments.
 - `cloudToken` — GitHub classic PAT with `gist` scope (`ghp_...`). Fine-grained tokens do not support the Gist API.
+- `geminiApiKey` — Google Gemini API key (`AIza…`). **Excluded from Gist sync** (in `saveToGist` OMIT_KEYS alongside `cloudToken`). Never logged. Only sent to `generativelanguage.googleapis.com` when the user submits a question.
 - `gkHistory` — grows as the user records each year-end. Used to determine `lastWithdrawal` baseline throughout the app.
 - `userBirthYear`, `daughterBirthYear`, `ecbDepositRate`, `healthInsuranceMonthlyEUR`, `sorrSeverityPct` — personal context fields used by trigger evaluation. Editable in Settings.
 
@@ -240,7 +248,11 @@ Optional cross-device sync. Setup: classic PAT at `github.com/settings/tokens` w
 
 ### Service Worker (`sw.js`)
 
-`SW_VERSION` must stay in lock-step with `APP_VERSION` in `engine.js`. Uses **stale-while-revalidate**: serves cached asset instantly, refreshes in background, swaps on next load. The `ASSETS` list includes `script.js` and `freedom.js` — other JS files are fetched from the network on each visit (stale-while-revalidate still caches them after first fetch).
+`SW_VERSION` must stay in lock-step with `APP_VERSION` in `engine.js`. Uses a **two-tier caching strategy**:
+- **Network-first** for all app files (the `ASSETS` list + any same-origin requests): always tries to fetch fresh from the network; falls back to cache only when offline.
+- **Cache-first** for CDN resources (`unpkg.com`, `fonts.googleapis.com`, `fonts.gstatic.com`): serves from cache instantly; only fetches on first miss. These are pinned versions that never change.
+
+CDN detection is handled by `isCdn(url)` checking `url.hostname` against `CDN_ORIGINS`.
 
 ### Tests (`tests.html`)
 
