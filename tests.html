@@ -213,14 +213,16 @@ group("simulateAffordability — verdict logic", (T) => {
   out.push(assert(simNoDelta.before.exitZone.id === "safe" || simNoDelta.before.exitZone.id === "elevated", "before zone is safe or elevated at 4%", `got ${simNoDelta.before.exitZone.id}`));
 
   // funDelta +200 (fun €200→€400): afterMonthlyExpenses = 2200, afterAnnualExpenses = 26400
-  // afterFireTarget = 26400/0.04 = 660k; exitWR = 26400/600000 = 4.4% → elevated
+  // afterFireTarget = 26400/0.04 = 660k; afterExitWR = 26400/600000 = 4.4% (elevated, informational only)
+  // Phase = "employed" (accumulating) → verdict is surplus/timeline-based, NOT WR-based.
+  // aSurplus = 8000-2200 = 5800 > 0; deltaMonths ≈ 8 < 12 → verdict is "Fine."
   const simFun200 = simulateAffordability(baseState, { funDelta: 200 });
   out.push(assert(simFun200.after.fireTarget === 660000, "after fireTarget = 660k (+€200/mo fun)", `got ${simFun200.after.fireTarget}`));
   out.push(assert(simFun200.after.monthlyExpenses === 2200, "after monthlyExpenses = 2200", `got ${simFun200.after.monthlyExpenses}`));
   out.push(assert(simFun200.after.surplusMonthly === 5800, "after surplus = 5800", `got ${simFun200.after.surplusMonthly}`));
-  out.push(assert(simFun200.after.exitWR > 4.3 && simFun200.after.exitWR < 4.5, "after exitWR ≈ 4.4% (elevated)", `got ${simFun200.after.exitWR.toFixed(2)}%`));
-  out.push(assert(simFun200.verdict.tone === "bad", "verdict.tone === bad (elevated zone)", `got ${simFun200.verdict.tone}`));
-  out.push(assert(simFun200.verdict.headline === "No.", "verdict.headline === No.", `got ${simFun200.verdict.headline}`));
+  out.push(assert(simFun200.after.exitWR > 4.3 && simFun200.after.exitWR < 4.5, "after exitWR ≈ 4.4% (still computed, informational only)", `got ${simFun200.after.exitWR.toFixed(2)}%`));
+  out.push(assert(simFun200.verdict.tone === "good", "verdict.tone === good (employed, healthy surplus, deltaMonths < 12)", `got ${simFun200.verdict.tone}`));
+  out.push(assert(simFun200.verdict.headline === "Fine.", "verdict.headline === Fine. (accumulating: income covers spend)", `got ${simFun200.verdict.headline}`));
 
   // funDelta +50 (small raise, stays in safe zone)
   // afterAnnualExpenses = (2050)×12 = 24600, afterFireTarget = 615k
