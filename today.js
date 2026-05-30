@@ -615,41 +615,31 @@ function AffordabilityCard({ state, setState, isMobile }) {
     setSandboxFun(state.monthlyFunEUR || 0);
   }, [state.monthlyFunEUR]);
 
-  const funDelta   = sandboxFun - baseFun;
-  const hasChange  = funDelta !== 0 || sandboxOneOff > 0;
+  const funDelta  = sandboxFun - baseFun;
+  const hasChange = funDelta !== 0 || sandboxOneOff > 0;
 
+  // Always evaluate — zero-change case returns current-state assessment.
   const sim = simulateAffordability(state, { funDelta, oneOff: sandboxOneOff });
-  const { before, after, deltaMonths, oneOffMonths, verdict, isAccumulating } = sim;
+  const { before, after, deltaMonths, oneOffMonths, verdict, isAccumulating, group } = sim;
 
   const verdictColor = verdict.tone === "good" ? "var(--good)" : verdict.tone === "warn" ? "var(--warn)" : "var(--bad)";
   const verdictBg    = verdict.tone === "good" ? "var(--good-soft)" : verdict.tone === "warn" ? "var(--warn-soft)" : "rgba(239,115,115,0.08)";
 
-  // Combined after-months: recurring timeline impact + one-off savings cost
+  // Combined after-months: recurring timeline + one-off savings cost.
   const afterMonths = (() => {
     const base = after.monthsToFire;
     if (!Number.isFinite(base)) return Infinity;
-    if (sandboxOneOff > 0) {
-      return Number.isFinite(oneOffMonths) ? base + oneOffMonths : Infinity;
-    }
+    if (sandboxOneOff > 0) return Number.isFinite(oneOffMonths) ? base + oneOffMonths : Infinity;
     return base;
   })();
 
   const totalDelta = (Number.isFinite(afterMonths) && Number.isFinite(before.monthsToFire))
     ? afterMonths - before.monthsToFire : null;
 
-  const chipStyle = (active) => ({
-    padding: "5px 11px", borderRadius: 999, fontSize: 12, fontWeight: 600,
-    cursor: "pointer", userSelect: "none",
-    border: `1px solid ${active ? "var(--accent)" : "var(--hairline)"}`,
-    background: active ? "var(--accent-soft)" : "var(--surface-2)",
-    color: active ? "var(--accent)" : "var(--fg-mute)",
-    whiteSpace: "nowrap",
-  });
-
   const isInfBefore = !Number.isFinite(before.monthsToFire);
   const isInfAfter  = !Number.isFinite(afterMonths);
 
-  // Describe what changed in the "After" column header
+  // Describe what changed in the "After" column header.
   const afterLabel = (() => {
     const parts = [];
     if (funDelta !== 0) parts.push(`Fun ${fmtEur(sandboxFun)}/mo`);
@@ -657,88 +647,74 @@ function AffordabilityCard({ state, setState, isMobile }) {
     return parts.join(" + ") || "After";
   })();
 
+  // Metric shown in before/after grid: surplus/draw for accumulating; WR pill for full draw.
+  const MetricChip = ({ surplusMonthly, actualDrawWR, isAfter }) => {
+    if (group === "full") {
+      const zone = isAfter ? after.exitZone : before.exitZone;
+      const wr   = isAfter ? after.exitWR   : before.exitWR;
+      return <Pill tone={zone.tone} size="xs">{wr.toFixed(1)}% · {zone.label}</Pill>;
+    }
+    if (surplusMonthly >= 0) {
+      return (
+        <span style={{ fontSize: 11, color: "var(--fg-soft)", fontFamily: "var(--font-mono)" }}>
+          Surplus {fmtEur(surplusMonthly)}/mo
+        </span>
+      );
+    }
+    const drawColor = (actualDrawWR || 0) > GK_CONFIG.IWR * 100 ? "var(--warn)" : "var(--fg-soft)";
+    return (
+      <span style={{ fontSize: 11, color: drawColor, fontFamily: "var(--font-mono)" }}>
+        Draw {fmtEur(-surplusMonthly)}/mo · {(actualDrawWR || 0).toFixed(2)}%
+      </span>
+    );
+  };
+
   return (
     <Card padding={isMobile ? 20 : 24}>
       <SectionHeader
         title="Affordability sandbox"
-        subtitle="Try changes without saving. 'Apply' commits to Plan."
+        subtitle="Changes are not saved until you click 'Apply'."
       />
 
-      <Stack gap={14} style={{ marginBottom: 14 }}>
-        {/* Monthly fun budget */}
-        <div>
-          <NumberField
-            label="Monthly fun budget"
-            value={sandboxFun}
-            onChange={v => setSandboxFun(v)}
-            min={0} step={25}
-            prefix="€" format={v => v.toLocaleString("en-GB")}
-          />
-          <Row gap={6} wrap style={{ marginTop: 8 }}>
-            {[100, 200].map(d => {
-              const v = baseFun + d;
-              return (
-                <button key={d} onClick={() => setSandboxFun(v)} style={chipStyle(sandboxFun === v)}>
-                  +€{d}
-                </button>
-              );
-            })}
-            {funDelta !== 0 && (
-              <button onClick={() => setSandboxFun(baseFun)} style={{ ...chipStyle(false), color: "var(--fg-soft)" }}>
-                Reset
-              </button>
-            )}
-          </Row>
-        </div>
-
-        {/* One-off purchase */}
-        <div>
-          <NumberField
-            label="One-off purchase"
-            value={sandboxOneOff}
-            onChange={v => setSandboxOneOff(Math.max(0, v))}
-            min={0} step={100}
-            prefix="€" format={v => v.toLocaleString("en-GB")}
-          />
-          <Row gap={6} wrap style={{ marginTop: 8 }}>
-            {[500, 1000, 5000].map(v => (
-              <button key={v} onClick={() => setSandboxOneOff(v)} style={chipStyle(sandboxOneOff === v)}>
-                {fmtEurK(v)}
-              </button>
-            ))}
-            {sandboxOneOff > 0 && (
-              <button onClick={() => setSandboxOneOff(0)} style={{ ...chipStyle(false), color: "var(--fg-soft)" }}>
-                Clear
-              </button>
-            )}
-          </Row>
-        </div>
+      <Stack gap={12} style={{ marginBottom: 16 }}>
+        <NumberField
+          label="Monthly fun budget"
+          value={sandboxFun}
+          onChange={v => setSandboxFun(v)}
+          min={0} step={25}
+          prefix="€" format={v => v.toLocaleString("en-GB")}
+        />
+        <NumberField
+          label="One-off purchase"
+          value={sandboxOneOff}
+          onChange={v => setSandboxOneOff(Math.max(0, v))}
+          min={0} step={100}
+          prefix="€" format={v => v.toLocaleString("en-GB")}
+        />
+        {hasChange && (
+          <button
+            onClick={() => { setSandboxFun(baseFun); setSandboxOneOff(0); }}
+            style={{ alignSelf: "flex-start", padding: "3px 10px", borderRadius: 6, fontSize: 11, fontWeight: 600, cursor: "pointer", border: "1px solid var(--hairline)", background: "transparent", color: "var(--fg-mute)" }}>
+            Reset
+          </button>
+        )}
       </Stack>
 
-      {!hasChange && (
-        <div style={{ fontSize: 13, color: "var(--fg-mute)", lineHeight: 1.6 }}>
-          Adjust the fun budget or enter a one-off purchase to see the impact on your FIRE timeline.
+      {/* Verdict — always shown (current-state assessment or change impact) */}
+      <Stack gap={12}>
+        <div style={{ padding: "11px 14px", borderRadius: 10, background: verdictBg, border: `1px solid ${verdictColor}40` }}>
+          <Row gap={8} align="baseline" wrap>
+            <span style={{ fontSize: 14, fontWeight: 700, color: verdictColor, flexShrink: 0 }}>
+              {verdict.headline}
+            </span>
+            <span style={{ fontSize: 13, color: "var(--fg-mute)", lineHeight: 1.5 }}>
+              {verdict.text}
+            </span>
+          </Row>
         </div>
-      )}
 
-      {hasChange && (
-        <Stack gap={12}>
-          {/* Verdict */}
-          <div style={{
-            padding: "11px 14px", borderRadius: 10,
-            background: verdictBg, border: `1px solid ${verdictColor}40`,
-          }}>
-            <Row gap={8} align="baseline" wrap>
-              <span style={{ fontSize: 14, fontWeight: 700, color: verdictColor, flexShrink: 0 }}>
-                {verdict.headline}
-              </span>
-              <span style={{ fontSize: 13, color: "var(--fg-mute)", lineHeight: 1.5 }}>
-                {verdict.text}
-              </span>
-            </Row>
-          </div>
-
-          {/* Before → After */}
+        {/* Before → After grid — only when something changed */}
+        {hasChange && (
           <div style={{
             padding: "12px 14px", background: "var(--surface-2)", borderRadius: 10,
             display: "grid", gridTemplateColumns: "1fr auto 1fr",
@@ -757,15 +733,7 @@ function AffordabilityCard({ state, setState, isMobile }) {
                 Target {fmtEur(before.fireTarget)}
               </div>
               <div style={{ marginTop: 5 }}>
-                {isAccumulating ? (
-                  <span style={{ fontSize: 11, color: "var(--fg-soft)", fontFamily: "var(--font-mono)" }}>
-                    Surplus {fmtEur(before.surplusMonthly)}/mo
-                  </span>
-                ) : (
-                  <Pill tone={before.exitZone.tone} size="xs">
-                    {before.exitWR.toFixed(1)}% · {before.exitZone.label}
-                  </Pill>
-                )}
+                <MetricChip surplusMonthly={before.surplusMonthly} actualDrawWR={before.actualDrawWR} isAfter={false} />
               </div>
             </div>
 
@@ -787,15 +755,7 @@ function AffordabilityCard({ state, setState, isMobile }) {
                 Target {fmtEur(after.fireTarget)}
               </div>
               <Row gap={6} align="center" style={{ marginTop: 5 }}>
-                {isAccumulating ? (
-                  <span style={{ fontSize: 11, color: after.surplusMonthly < 0 ? "var(--bad)" : "var(--fg-soft)", fontFamily: "var(--font-mono)" }}>
-                    Surplus {fmtEur(after.surplusMonthly)}/mo
-                  </span>
-                ) : (
-                  <Pill tone={after.exitZone.tone} size="xs">
-                    {after.exitWR.toFixed(1)}% · {after.exitZone.label}
-                  </Pill>
-                )}
+                <MetricChip surplusMonthly={after.surplusMonthly} actualDrawWR={after.actualDrawWR} isAfter={true} />
                 {totalDelta !== null && totalDelta !== 0 && (
                   <span style={{ fontSize: 11, fontFamily: "var(--font-mono)", color: totalDelta > 0 ? "var(--warn)" : "var(--good)" }}>
                     {totalDelta > 0 ? "+" : ""}{Math.round(totalDelta)} mo
@@ -804,18 +764,15 @@ function AffordabilityCard({ state, setState, isMobile }) {
               </Row>
             </div>
           </div>
+        )}
 
-          {/* Apply button — only for recurring changes */}
-          {funDelta !== 0 && (
-            <Button
-              tone="secondary"
-              onClick={() => setState(s => ({ ...s, monthlyFunEUR: sandboxFun }))}
-            >
-              Apply to Plan
-            </Button>
-          )}
-        </Stack>
-      )}
+        {/* Apply button — only for recurring changes */}
+        {funDelta !== 0 && (
+          <Button tone="secondary" onClick={() => setState(s => ({ ...s, monthlyFunEUR: sandboxFun }))}>
+            Apply to Plan
+          </Button>
+        )}
+      </Stack>
     </Card>
   );
 }
