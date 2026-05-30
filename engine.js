@@ -1,6 +1,6 @@
 // ─── Compass FIRE Planner — Engine (pure math, state shape preserved) ───
 
-const APP_VERSION = "20260529.2";
+const APP_VERSION = "20260529.3";
 
 const GK_CONFIG = {
   IWR: 0.04,
@@ -962,9 +962,17 @@ function simulateAffordability(state, { funDelta = 0, essentialsDelta = 0, oneOf
   const portfolio = (state.bucketVWCE || 0) + (state.bucketXEON || 0) + (state.bucketFixedIncome || 0) + (state.bucketCash || 0);
   const exitPort  = exitPortfolio !== null ? exitPortfolio : portfolio;
   const r         = realMonthlyRate(state);
-  // Accumulating phases: still earning a salary — verdict is surplus/timeline-based, NOT WR-based.
-  // WR is only meaningful when actually drawing from the portfolio.
-  const isAccumulating = ["employed", "coast_fire", "barista_fire"].includes(cf.phase.id);
+
+  // ── Phase grouping ────────────────────────────────────────────────────────
+  // pure   — employed/coast_fire: income should cover expenses; drawing is unusual.
+  // hybrid — barista_fire/laid_off: small portfolio draws are DESIGNED INTO these phases; never
+  //          auto-"No." just because aSurplus < 0. The actual draw WR is what matters.
+  // full   — lean_fire/full_fire: living from the portfolio; exit zone IS the WR zone.
+  const PURE_ACCUM = new Set(["employed", "coast_fire"]);
+  const HYBRID     = new Set(["barista_fire", "laid_off"]);
+  const group = PURE_ACCUM.has(cf.phase.id) ? "pure"
+              : HYBRID.has(cf.phase.id)     ? "hybrid"
+              : "full";
 
   // ── Before ────────────────────────────────────────────────────────────────
   const bMonthlyExp = cf.totalExpenses;
@@ -1004,88 +1012,213 @@ function simulateAffordability(state, { funDelta = 0, essentialsDelta = 0, oneOf
     exitZone:        aExitZone,
   };
 
-  // One-off delay — uses aSurplus so "months of savings" reflects the new spend level.
-  // e.g. buying a phone when you already raised fun budget eats into the lower surplus.
+  // ── Derived signals ────────────────────────────────────────────────────────
+  // Actual annual WR — what you really pull from the portfolio. Zero when income ≥ expenses.
+  const actualDrawBefore = portfolio > 0 ? (Math.max(0, -bSurplus) * 12) / portfolio * 100 : 0;
+  const actualDrawAfter  = portfolio > 0 ? (Math.max(0, -aSurplus) * 12) / portfolio * 100 : 0;
+  // What fraction of the portfolio a one-off purchase consumes.
+  const oneOffPctOfPort  = (oneOff > 0 && portfolio > 0) ? (oneOff / portfolio) * 100 : 0;
+
+  // One-off delay — uses aSurplus so the "months of savings" reflects the new spend level.
   const oneOffMonths = (oneOff > 0 && aSurplus > 0)
     ? Math.ceil(oneOff / aSurplus)
     : (oneOff > 0 ? Infinity : 0);
 
-  // Delta months (recurring only; one-off is tracked separately)
+  // Delta months (recurring only; one-off tracked separately).
   const deltaMonths = (Number.isFinite(aMonths) && Number.isFinite(bMonths))
     ? aMonths - bMonths
     : (!Number.isFinite(aMonths) && !Number.isFinite(bMonths)) ? 0 : Infinity;
 
-  // ── Verdict ────────────────────────────────────────────────────────────────
+  // Whether a change is being evaluated, or this is a current-state assessment.
+  const hasRecurringChange = funDelta !== 0 || essentialsDelta !== 0;
+  const hasOneOff          = oneOff > 0;
+  const isZeroChange       = !hasRecurringChange && !hasOneOff;
+
+  // GK thresholds as % (for comparison with actualDraw%).
+  const UPPER_GR = GK_CONFIG.UPPER_GUARDRAIL * 100;  // 3.2
+  const IWR_PCT  = GK_CONFIG.IWR * 100;              // 4.0
+  const LOWER_GR = GK_CONFIG.LOWER_GUARDRAIL * 100;  // 4.8
+
+  // For full-draw zone comparison.
   const ZONE_ORDER   = ["covered", "prosperity", "safe", "elevated", "cut"];
-  const bZoneIdx     = ZONE_ORDER.indexOf(bExitZone.id);
-  const aZoneIdx     = ZONE_ORDER.indexOf(aExitZone.id);
-  const zoneWorsened = aZoneIdx > bZoneIdx;
+  const zoneWorsened = ZONE_ORDER.indexOf(aExitZone.id) > ZONE_ORDER.indexOf(bExitZone.id);
+
+  // ── Verdict text helpers ───────────────────────────────────────────────────
+  const moMonths = (m) =>
+    !Number.isFinite(m) ? "open-ended"
+    : `${Math.round(m)} month${Math.round(m) === 1 ? "" : "s"}`;
+
+  const timelineFrag = () => {
+    if (!hasRecurringChange) return null;
+    if (!Number.isFinite(deltaMonths)) return "timeline becomes open-ended";
+    if (deltaMonths > 0)  return `+${Math.round(deltaMonths)} months to FIRE`;
+    if (deltaMonths < 0)  return `saves ${Math.round(-deltaMonths)} months`;
+    return "no change to timeline";
+  };
+  const oneOffFrag = () => {
+    if (!hasOneOff) return null;
+    if (!Number.isFinite(oneOffMonths)) return "the one-off exceeds your monthly surplus";
+    return `the one-off costs ${moMonths(oneOffMonths)} of savings`;
+  };
+  const assemble = (prefix, frags) => {
+    const parts = frags.filter(Boolean);
+    let body = parts.length ? parts.join("; ") : "no material change";
+    body = body.charAt(0).toUpperCase() + body.slice(1);
+    return `${prefix} ${body}.`.trim();
+  };
 
   let tone, headline, text;
 
-  if (isAccumulating) {
-    // Employed/Coast/Barista: income is the primary resource, not the portfolio.
-    // Verdict is purely about income coverage and timeline; portfolio WR is informational only.
-    if (aSurplus < 0) {
-      // Spending now exceeds income — requires actual portfolio draws
-      tone = "bad"; headline = "No.";
-      text = `At ${fmtEur(aMonthlyExp)}/mo spending, expenses exceed income — portfolio draws required.`;
-    } else {
-      const recurMonths = Number.isFinite(deltaMonths) ? deltaMonths : Infinity;
-      const ooMonths    = Number.isFinite(oneOffMonths) ? oneOffMonths : Infinity;
-      const totalDelay  = recurMonths + ooMonths;
-
-      if (!Number.isFinite(totalDelay) || totalDelay > 12) {
+  // ════════════════════════════════════════════════════════════════════════════
+  // STEP 1 — Zero-change: current-state assessment
+  // ════════════════════════════════════════════════════════════════════════════
+  if (isZeroChange) {
+    if (group === "full") {
+      if (bExitZone.id === "cut") {
+        tone = "bad"; headline = "No.";
+        text = `Current withdrawal rate ${bExitWR.toFixed(1)}% is in the cut zone (above the ${LOWER_GR}% guardrail). Spending needs to come down.`;
+      } else if (bExitZone.id === "elevated") {
         tone = "warn"; headline = "Careful.";
-        const bits = [];
-        if (funDelta !== 0) {
-          bits.push(Number.isFinite(deltaMonths) && deltaMonths > 0
-            ? `+${Math.round(deltaMonths)} months to FIRE`
-            : !Number.isFinite(deltaMonths) ? "timeline becomes open-ended"
-            : `${Math.round(deltaMonths)} months`);
-        }
-        if (oneOff > 0) {
-          bits.push(Number.isFinite(oneOffMonths)
-            ? `one-off 'costs' ${Math.round(oneOffMonths)} months of savings`
-            : "one-off exceeds monthly surplus");
-        }
-        text = bits.join("; ") + ".";
-        if (funDelta !== 0) text += ` Monthly surplus: ${fmtEur(aSurplus)}/mo.`;
+        text = `Current withdrawal rate ${bExitWR.toFixed(1)}% is elevated — approaching the ${LOWER_GR}% guardrail.`;
       } else {
         tone = "good"; headline = "Fine.";
-        const bits = [];
-        if (funDelta !== 0 && Number.isFinite(deltaMonths)) {
-          if (deltaMonths > 0)      bits.push(`+${Math.round(deltaMonths)} months to FIRE`);
-          else if (deltaMonths < 0) bits.push(`saves ${Math.round(-deltaMonths)} months`);
-          else                      bits.push("no timeline change");
+        text = `Current withdrawal rate ${bExitWR.toFixed(1)}% sits in the ${bExitZone.label} zone. Sustainable.`;
+      }
+    } else if (group === "hybrid") {
+      if (actualDrawBefore > LOWER_GR) {
+        tone = "bad"; headline = "No.";
+        text = `Your draw rate of ${actualDrawBefore.toFixed(2)}% is past the ${LOWER_GR}% guardrail. The portfolio can't sustain this.`;
+      } else if (actualDrawBefore > IWR_PCT) {
+        tone = "warn"; headline = "Careful.";
+        text = `Your draw rate of ${actualDrawBefore.toFixed(2)}% is above the 4% baseline — keep an eye on it.`;
+      } else if (actualDrawBefore > 0) {
+        tone = "good"; headline = "Fine.";
+        text = `Drawing ${fmtEur(Math.round(-bSurplus))}/mo — just ${actualDrawBefore.toFixed(2)}% of your portfolio. Well within range.`;
+      } else {
+        tone = "good"; headline = "Fine.";
+        text = `Income covers expenses with ${fmtEur(bSurplus)}/mo to spare. Portfolio untouched.`;
+      }
+    } else {
+      // Pure accumulating
+      if (bSurplus < 0) {
+        if (actualDrawBefore > IWR_PCT) {
+          tone = "bad"; headline = "No.";
+          text = `Expenses exceed income and you're drawing ${actualDrawBefore.toFixed(1)}% of the portfolio — unsustainable while employed.`;
+        } else {
+          tone = "warn"; headline = "Careful.";
+          text = `Expenses exceed income by ${fmtEur(Math.round(-bSurplus))}/mo (${actualDrawBefore.toFixed(2)}% draw). Unusual while earning — worth reviewing.`;
         }
-        if (oneOff > 0 && Number.isFinite(oneOffMonths) && oneOffMonths > 0) {
-          bits.push(`one-off 'costs' ${Math.round(oneOffMonths)} month${oneOffMonths !== 1 ? "s" : ""} of savings`);
-        }
-        if (bits.length === 0) bits.push("no material change");
-        const t = bits.join("; ") + ".";
-        text = t.charAt(0).toUpperCase() + t.slice(1);
+      } else {
+        tone = "good"; headline = "Fine.";
+        text = `Current setup: ${fmtEur(bSurplus)}/mo surplus, ${moMonths(bMonths)} to FIRE.`;
       }
     }
   } else {
-    // Drawing phases (lean_fire, full_fire, laid_off): portfolio WR is what matters.
-    if (aExitZone.id === "cut" || aExitZone.id === "elevated") {
-      tone = "bad"; headline = "No.";
-      text = `At ${fmtEur(aMonthlyExp)}/mo, exit WR is ${aExitWR.toFixed(1)}% (${aExitZone.label}) — outside safe-withdrawal range.`;
-    } else if ((Number.isFinite(deltaMonths) && deltaMonths > 12) || zoneWorsened) {
-      tone = "warn"; headline = "Careful.";
-      const dtText = Number.isFinite(deltaMonths) && deltaMonths !== 0
-        ? ` FIRE moves ${deltaMonths > 0 ? "+" : ""}${Math.round(deltaMonths)} months.` : "";
-      text = `Exit WR ${aExitWR.toFixed(1)}% (${aExitZone.label}).${dtText}`;
+    // ════════════════════════════════════════════════════════════════════════
+    // STEP 2 — A change is active
+    // ════════════════════════════════════════════════════════════════════════
+
+    // 2a. One-off severity — portfolio-fraction + recoverability check.
+    let oneOffSeverity = "none";
+    if (hasOneOff) {
+      if (oneOffPctOfPort >= 10 || (!Number.isFinite(oneOffMonths) && oneOffPctOfPort >= 2)) {
+        oneOffSeverity = "bad";
+      } else if (!Number.isFinite(oneOffMonths) || oneOffMonths > 12) {
+        oneOffSeverity = "warn";
+      }
+    }
+
+    // 2b. Recurring-change tone per group.
+    let recurTone = "good";
+    if (group === "full") {
+      if (aExitZone.id === "cut" || aExitZone.id === "elevated") recurTone = "bad";
+      else if (zoneWorsened || (Number.isFinite(deltaMonths) && deltaMonths > 12)) recurTone = "warn";
+    } else if (group === "hybrid") {
+      // Actual draw WR drives this — sign of aSurplus is never a disqualifier.
+      if (actualDrawAfter > LOWER_GR)        recurTone = "bad";
+      else if (actualDrawAfter > IWR_PCT)    recurTone = "warn";
+      else if (actualDrawAfter > UPPER_GR && actualDrawAfter > actualDrawBefore + 0.25) recurTone = "warn";
     } else {
-      tone = "good"; headline = "Fine.";
-      const dtText = Number.isFinite(deltaMonths) && deltaMonths !== 0
-        ? ` FIRE moves ${deltaMonths > 0 ? "+" : ""}${Math.round(deltaMonths)} months.` : " No change to timeline.";
-      text = `Exit WR ${aExitWR.toFixed(1)}% stays in the ${aExitZone.label} zone.${dtText}`;
+      // Pure accumulating
+      if (aSurplus < 0) {
+        // Forced into a draw — judge by magnitude, not mere sign.
+        if (actualDrawAfter > IWR_PCT) recurTone = "bad";
+        else recurTone = "warn"; // small forced draw: caution, not auto-"No."
+      } else {
+        const recur = Number.isFinite(deltaMonths) ? deltaMonths : Infinity;
+        if (!Number.isFinite(recur) || recur > 12) recurTone = "warn";
+      }
+    }
+
+    // 2c. Final tone = worst of recurring and one-off.
+    const RANK = { good: 0, warn: 1, bad: 2 };
+    const finalRank = Math.max(RANK[recurTone], RANK[oneOffSeverity === "none" ? "good" : oneOffSeverity]);
+    tone     = finalRank === 2 ? "bad" : finalRank === 1 ? "warn" : "good";
+    headline = tone === "bad" ? "No." : tone === "warn" ? "Careful." : "Fine.";
+
+    // ════════════════════════════════════════════════════════════════════════
+    // STEP 3 — Verdict text
+    // ════════════════════════════════════════════════════════════════════════
+    if (tone === "bad") {
+      if (group === "pure" && aSurplus < 0) {
+        text = `This pushes spending to ${fmtEur(aMonthlyExp)}/mo — above your ${fmtEur(cf.incomeMonthly)}/mo income, requiring a ${actualDrawAfter.toFixed(1)}% portfolio draw.`;
+      } else if (group === "hybrid" && actualDrawAfter > LOWER_GR) {
+        text = `This raises your draw rate to ${actualDrawAfter.toFixed(2)}% — past the ${LOWER_GR}% guardrail. Not sustainable.`;
+      } else if (group === "full" && (aExitZone.id === "cut" || aExitZone.id === "elevated")) {
+        text = `At ${fmtEur(aMonthlyExp)}/mo, withdrawal rate is ${aExitWR.toFixed(1)}% (${aExitZone.label}) — outside the safe range.`;
+      } else if (oneOffSeverity === "bad") {
+        text = oneOffPctOfPort >= 10
+          ? `That one-off is ${oneOffPctOfPort.toFixed(0)}% of your portfolio (${fmtEur(oneOff)}). Too large to absorb in one go.`
+          : `No surplus to recover the ${fmtEur(oneOff)} one-off — it would draw indefinitely from the portfolio.`;
+      } else {
+        text = assemble("", [timelineFrag(), oneOffFrag()]).trim();
+      }
+    } else if (tone === "warn") {
+      const frags = [];
+      if (group === "full") {
+        frags.push(`exit WR ${aExitWR.toFixed(1)}% (${aExitZone.label})`);
+        if (hasRecurringChange && timelineFrag()) frags.push(timelineFrag());
+      } else if (group === "hybrid") {
+        frags.push(`draw rate rises to ${actualDrawAfter.toFixed(2)}% (still within range, but higher)`);
+        if (hasRecurringChange && timelineFrag()) frags.push(timelineFrag());
+      } else {
+        if (aSurplus < 0) {
+          frags.push(`expenses exceed income by ${fmtEur(Math.round(-aSurplus))}/mo — a ${actualDrawAfter.toFixed(2)}% portfolio draw`);
+        } else {
+          if (timelineFrag()) frags.push(timelineFrag());
+          frags.push(`surplus drops to ${fmtEur(aSurplus)}/mo`);
+        }
+      }
+      if (oneOffSeverity !== "none") frags.push(oneOffFrag());
+      text = assemble("Careful.", frags);
+    } else {
+      // Fine.
+      const frags = [];
+      if (hasRecurringChange) {
+        if (timelineFrag()) frags.push(timelineFrag());
+        if (group === "pure" && bSurplus !== aSurplus) {
+          frags.push(`surplus ${fmtEur(bSurplus)} → ${fmtEur(aSurplus)}/mo`);
+        } else if (group === "hybrid" && actualDrawAfter > 0) {
+          frags.push(`draw rate ${actualDrawAfter.toFixed(2)}% — well within range`);
+        } else if (group === "full") {
+          frags.push(`exit WR holds at ${aExitWR.toFixed(1)}% (${aExitZone.label})`);
+        }
+      }
+      if (hasOneOff && Number.isFinite(oneOffMonths) && oneOffMonths > 0) {
+        frags.push(`the one-off costs ${moMonths(oneOffMonths)} of savings`);
+      }
+      text = assemble("Fine.", frags);
     }
   }
 
-  return { before, after, deltaMonths, oneOffMonths, verdict: { tone, headline, text }, isAccumulating };
+  return {
+    before: { ...before, actualDrawWR: actualDrawBefore },
+    after:  { ...after,  actualDrawWR: actualDrawAfter  },
+    deltaMonths, oneOffMonths,
+    verdict: { tone, headline, text },
+    isAccumulating: group !== "full",
+    group,
+  };
 }
 
 function buildAIContext(state) {
