@@ -608,31 +608,34 @@ function ThisMonthCard({ outlook, state, isMobile, monthsOf }) {
 function AffordabilityCard({ state, setState, isMobile }) {
   const baseFun = state.monthlyFunEUR || 0;
   const [sandboxFun, setSandboxFun] = React.useState(baseFun);
-  const [oneOff, setOneOff] = React.useState(0);
+  const [sandboxOneOff, setSandboxOneOff] = React.useState(0);
 
   // Keep sandbox in sync when Plan applies a change
   React.useEffect(() => {
     setSandboxFun(state.monthlyFunEUR || 0);
   }, [state.monthlyFunEUR]);
 
-  const funDelta  = sandboxFun - baseFun;
-  const hasChange = funDelta !== 0 || oneOff > 0;
+  const funDelta   = sandboxFun - baseFun;
+  const hasChange  = funDelta !== 0 || sandboxOneOff > 0;
 
-  const sim = simulateAffordability(state, { funDelta, oneOff });
-  const { before, after, deltaMonths, oneOffMonths, verdict } = sim;
+  const sim = simulateAffordability(state, { funDelta, oneOff: sandboxOneOff });
+  const { before, after, deltaMonths, oneOffMonths, verdict, isAccumulating } = sim;
 
   const verdictColor = verdict.tone === "good" ? "var(--good)" : verdict.tone === "warn" ? "var(--warn)" : "var(--bad)";
   const verdictBg    = verdict.tone === "good" ? "var(--good-soft)" : verdict.tone === "warn" ? "var(--warn-soft)" : "rgba(239,115,115,0.08)";
 
-  // For one-off only: shift the before timeline by oneOffMonths, keep same target/zone
-  const isOneOffOnly  = oneOff > 0 && funDelta === 0;
-  const afterMonths   = isOneOffOnly
-    ? (Number.isFinite(before.monthsToFire) && Number.isFinite(oneOffMonths)
-        ? before.monthsToFire + oneOffMonths : Infinity)
-    : after.monthsToFire;
-  const afterTarget   = isOneOffOnly ? before.fireTarget  : after.fireTarget;
-  const afterZone     = isOneOffOnly ? before.exitZone    : after.exitZone;
-  const afterWR       = isOneOffOnly ? before.exitWR      : after.exitWR;
+  // Combined after-months: recurring timeline impact + one-off savings cost
+  const afterMonths = (() => {
+    const base = after.monthsToFire;
+    if (!Number.isFinite(base)) return Infinity;
+    if (sandboxOneOff > 0) {
+      return Number.isFinite(oneOffMonths) ? base + oneOffMonths : Infinity;
+    }
+    return base;
+  })();
+
+  const totalDelta = (Number.isFinite(afterMonths) && Number.isFinite(before.monthsToFire))
+    ? afterMonths - before.monthsToFire : null;
 
   const chipStyle = (active) => ({
     padding: "5px 11px", borderRadius: 999, fontSize: 12, fontWeight: 600,
@@ -640,55 +643,81 @@ function AffordabilityCard({ state, setState, isMobile }) {
     border: `1px solid ${active ? "var(--accent)" : "var(--hairline)"}`,
     background: active ? "var(--accent-soft)" : "var(--surface-2)",
     color: active ? "var(--accent)" : "var(--fg-mute)",
+    whiteSpace: "nowrap",
   });
 
   const isInfBefore = !Number.isFinite(before.monthsToFire);
   const isInfAfter  = !Number.isFinite(afterMonths);
 
+  // Describe what changed in the "After" column header
+  const afterLabel = (() => {
+    const parts = [];
+    if (funDelta !== 0) parts.push(`Fun ${fmtEur(sandboxFun)}/mo`);
+    if (sandboxOneOff > 0) parts.push(`+${fmtEur(sandboxOneOff)} once`);
+    return parts.join(" + ") || "After";
+  })();
+
   return (
     <Card padding={isMobile ? 20 : 24}>
       <SectionHeader
         title="Affordability sandbox"
-        subtitle="Try a spending change without saving it. 'Apply' commits to Plan."
+        subtitle="Try changes without saving. 'Apply' commits to Plan."
       />
 
-      <Stack gap={10} style={{ marginBottom: 14 }}>
-        <NumberField
-          label="Fun budget"
-          value={sandboxFun}
-          onChange={v => { setSandboxFun(v); setOneOff(0); }}
-          min={0} step={25}
-          prefix="€" format={v => v.toLocaleString("en-GB")}
-        />
-        <Row gap={6} wrap>
-          {[100, 200].map(d => {
-            const v = baseFun + d;
-            return (
-              <button key={d}
-                onClick={() => { setSandboxFun(v); setOneOff(0); }}
-                style={chipStyle(sandboxFun === v && oneOff === 0)}>
-                +€{d}
+      <Stack gap={14} style={{ marginBottom: 14 }}>
+        {/* Monthly fun budget */}
+        <div>
+          <NumberField
+            label="Monthly fun budget"
+            value={sandboxFun}
+            onChange={v => setSandboxFun(v)}
+            min={0} step={25}
+            prefix="€" format={v => v.toLocaleString("en-GB")}
+          />
+          <Row gap={6} wrap style={{ marginTop: 8 }}>
+            {[100, 200].map(d => {
+              const v = baseFun + d;
+              return (
+                <button key={d} onClick={() => setSandboxFun(v)} style={chipStyle(sandboxFun === v)}>
+                  +€{d}
+                </button>
+              );
+            })}
+            {funDelta !== 0 && (
+              <button onClick={() => setSandboxFun(baseFun)} style={{ ...chipStyle(false), color: "var(--fg-soft)" }}>
+                Reset
               </button>
-            );
-          })}
-          <button
-            onClick={() => { setSandboxFun(baseFun); setOneOff(5000); }}
-            style={chipStyle(oneOff === 5000 && sandboxFun === baseFun)}>
-            €5k one-off
-          </button>
-          {hasChange && (
-            <button
-              onClick={() => { setSandboxFun(baseFun); setOneOff(0); }}
-              style={{ ...chipStyle(false), color: "var(--fg-soft)" }}>
-              Reset
-            </button>
-          )}
-        </Row>
+            )}
+          </Row>
+        </div>
+
+        {/* One-off purchase */}
+        <div>
+          <NumberField
+            label="One-off purchase"
+            value={sandboxOneOff}
+            onChange={v => setSandboxOneOff(Math.max(0, v))}
+            min={0} step={100}
+            prefix="€" format={v => v.toLocaleString("en-GB")}
+          />
+          <Row gap={6} wrap style={{ marginTop: 8 }}>
+            {[500, 1000, 5000].map(v => (
+              <button key={v} onClick={() => setSandboxOneOff(v)} style={chipStyle(sandboxOneOff === v)}>
+                {fmtEurK(v)}
+              </button>
+            ))}
+            {sandboxOneOff > 0 && (
+              <button onClick={() => setSandboxOneOff(0)} style={{ ...chipStyle(false), color: "var(--fg-soft)" }}>
+                Clear
+              </button>
+            )}
+          </Row>
+        </div>
       </Stack>
 
       {!hasChange && (
         <div style={{ fontSize: 13, color: "var(--fg-mute)", lineHeight: 1.6 }}>
-          Adjust the fun budget or choose a preset to see the impact on your FIRE timeline and exit WR.
+          Adjust the fun budget or enter a one-off purchase to see the impact on your FIRE timeline.
         </div>
       )}
 
@@ -712,8 +741,7 @@ function AffordabilityCard({ state, setState, isMobile }) {
           {/* Before → After */}
           <div style={{
             padding: "12px 14px", background: "var(--surface-2)", borderRadius: 10,
-            display: "grid",
-            gridTemplateColumns: isMobile ? "1fr auto 1fr" : "1fr auto 1fr",
+            display: "grid", gridTemplateColumns: "1fr auto 1fr",
             gap: "0 12px", alignItems: "start",
           }}>
             {/* Before column */}
@@ -723,17 +751,21 @@ function AffordabilityCard({ state, setState, isMobile }) {
                 {fmtMonths(before.monthsToFire)}
               </div>
               {!isInfBefore && before.monthsToFire > 0 && fmtETA(before.monthsToFire) && (
-                <div style={{ fontSize: 11, color: "var(--fg-soft)", marginTop: 1 }}>
-                  {fmtETA(before.monthsToFire)}
-                </div>
+                <div style={{ fontSize: 11, color: "var(--fg-soft)", marginTop: 1 }}>{fmtETA(before.monthsToFire)}</div>
               )}
               <div style={{ fontSize: 11, color: "var(--fg-mute)", marginTop: 4, fontFamily: "var(--font-mono)" }}>
                 Target {fmtEur(before.fireTarget)}
               </div>
               <div style={{ marginTop: 5 }}>
-                <Pill tone={before.exitZone.tone} size="xs">
-                  {before.exitWR.toFixed(1)}% · {before.exitZone.label}
-                </Pill>
+                {isAccumulating ? (
+                  <span style={{ fontSize: 11, color: "var(--fg-soft)", fontFamily: "var(--font-mono)" }}>
+                    Surplus {fmtEur(before.surplusMonthly)}/mo
+                  </span>
+                ) : (
+                  <Pill tone={before.exitZone.tone} size="xs">
+                    {before.exitWR.toFixed(1)}% · {before.exitZone.label}
+                  </Pill>
+                )}
               </div>
             </div>
 
@@ -742,27 +774,31 @@ function AffordabilityCard({ state, setState, isMobile }) {
 
             {/* After column */}
             <div>
-              <div style={{ fontSize: 11, color: "var(--fg-soft)", textTransform: "uppercase", letterSpacing: "0.07em", fontWeight: 600, marginBottom: 6 }}>
-                {isOneOffOnly ? "After €5k" : `Fun ${fmtEur(sandboxFun)}/mo`}
+              <div style={{ fontSize: 11, color: "var(--fg-soft)", textTransform: "uppercase", letterSpacing: "0.07em", fontWeight: 600, marginBottom: 6, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                {afterLabel}
               </div>
               <div style={{ fontSize: 15, fontWeight: 700, color: "var(--fg)", fontFamily: "var(--font-mono)" }}>
                 {fmtMonths(afterMonths)}
               </div>
               {!isInfAfter && afterMonths > 0 && fmtETA(afterMonths) && (
-                <div style={{ fontSize: 11, color: "var(--fg-soft)", marginTop: 1 }}>
-                  {fmtETA(afterMonths)}
-                </div>
+                <div style={{ fontSize: 11, color: "var(--fg-soft)", marginTop: 1 }}>{fmtETA(afterMonths)}</div>
               )}
               <div style={{ fontSize: 11, color: "var(--fg-mute)", marginTop: 4, fontFamily: "var(--font-mono)" }}>
-                Target {fmtEur(afterTarget)}
+                Target {fmtEur(after.fireTarget)}
               </div>
               <Row gap={6} align="center" style={{ marginTop: 5 }}>
-                <Pill tone={afterZone.tone} size="xs">
-                  {afterWR.toFixed(1)}% · {afterZone.label}
-                </Pill>
-                {funDelta !== 0 && Number.isFinite(deltaMonths) && (
-                  <span style={{ fontSize: 11, fontFamily: "var(--font-mono)", color: deltaMonths > 0 ? "var(--warn)" : "var(--good)" }}>
-                    {deltaMonths > 0 ? "+" : ""}{Math.round(deltaMonths)} mo
+                {isAccumulating ? (
+                  <span style={{ fontSize: 11, color: after.surplusMonthly < 0 ? "var(--bad)" : "var(--fg-soft)", fontFamily: "var(--font-mono)" }}>
+                    Surplus {fmtEur(after.surplusMonthly)}/mo
+                  </span>
+                ) : (
+                  <Pill tone={after.exitZone.tone} size="xs">
+                    {after.exitWR.toFixed(1)}% · {after.exitZone.label}
+                  </Pill>
+                )}
+                {totalDelta !== null && totalDelta !== 0 && (
+                  <span style={{ fontSize: 11, fontFamily: "var(--font-mono)", color: totalDelta > 0 ? "var(--warn)" : "var(--good)" }}>
+                    {totalDelta > 0 ? "+" : ""}{Math.round(totalDelta)} mo
                   </span>
                 )}
               </Row>
@@ -900,16 +936,16 @@ function TodayView({ state, setState }) {
         </Card>
       )}
 
-      {/* ── Portfolio capacity ── */}
-      <PortfolioCapacityCard
-        safeMonthly={safeMonthly}
-        essentials={cf.essentials}
-        fullLife={cf.essentials + cf.fun}
-        isMobile={isMobile}
-      />
-
-      {/* ── Affordability sandbox ── */}
-      <AffordabilityCard state={state} setState={setState} isMobile={isMobile} />
+      {/* ── Portfolio capacity + Affordability sandbox (2-up on desktop) ── */}
+      <div style={{ display: "grid", gridTemplateColumns: isMobile ? "1fr" : "1fr 1fr", gap: 16, alignItems: "start" }}>
+        <PortfolioCapacityCard
+          safeMonthly={safeMonthly}
+          essentials={cf.essentials}
+          fullLife={cf.essentials + cf.fun}
+          isMobile={isMobile}
+        />
+        <AffordabilityCard state={state} setState={setState} isMobile={isMobile} />
+      </div>
 
       {/* ── This month ── */}
       <ThisMonthCard outlook={outlook} state={state} isMobile={isMobile} monthsOf={monthsOf} />

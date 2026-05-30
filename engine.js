@@ -1,6 +1,6 @@
 // ─── Compass FIRE Planner — Engine (pure math, state shape preserved) ───
 
-const APP_VERSION = "20260529.1";
+const APP_VERSION = "20260529.2";
 
 const GK_CONFIG = {
   IWR: 0.04,
@@ -962,6 +962,9 @@ function simulateAffordability(state, { funDelta = 0, essentialsDelta = 0, oneOf
   const portfolio = (state.bucketVWCE || 0) + (state.bucketXEON || 0) + (state.bucketFixedIncome || 0) + (state.bucketCash || 0);
   const exitPort  = exitPortfolio !== null ? exitPortfolio : portfolio;
   const r         = realMonthlyRate(state);
+  // Accumulating phases: still earning a salary — verdict is surplus/timeline-based, NOT WR-based.
+  // WR is only meaningful when actually drawing from the portfolio.
+  const isAccumulating = ["employed", "coast_fire", "barista_fire"].includes(cf.phase.id);
 
   // ── Before ────────────────────────────────────────────────────────────────
   const bMonthlyExp = cf.totalExpenses;
@@ -1001,12 +1004,13 @@ function simulateAffordability(state, { funDelta = 0, essentialsDelta = 0, oneOf
     exitZone:        aExitZone,
   };
 
-  // One-off delay (independent of recurring delta)
-  const oneOffMonths = (oneOff > 0 && bSurplus > 0)
-    ? Math.ceil(oneOff / bSurplus)
+  // One-off delay — uses aSurplus so "months of savings" reflects the new spend level.
+  // e.g. buying a phone when you already raised fun budget eats into the lower surplus.
+  const oneOffMonths = (oneOff > 0 && aSurplus > 0)
+    ? Math.ceil(oneOff / aSurplus)
     : (oneOff > 0 ? Infinity : 0);
 
-  // Delta months (recurring only)
+  // Delta months (recurring only; one-off is tracked separately)
   const deltaMonths = (Number.isFinite(aMonths) && Number.isFinite(bMonths))
     ? aMonths - bMonths
     : (!Number.isFinite(aMonths) && !Number.isFinite(bMonths)) ? 0 : Infinity;
@@ -1018,22 +1022,70 @@ function simulateAffordability(state, { funDelta = 0, essentialsDelta = 0, oneOf
   const zoneWorsened = aZoneIdx > bZoneIdx;
 
   let tone, headline, text;
-  if (aExitZone.id === "cut" || aExitZone.id === "elevated") {
-    tone = "bad"; headline = "No.";
-    text = `At ${fmtEur(aMonthlyExp)}/mo, exit WR is ${aExitWR.toFixed(1)}% (${aExitZone.label}) — outside safe-withdrawal range.`;
-  } else if ((Number.isFinite(deltaMonths) && deltaMonths > 12) || zoneWorsened) {
-    tone = "warn"; headline = "Careful.";
-    const dtText = Number.isFinite(deltaMonths) && deltaMonths !== 0
-      ? ` FIRE moves ${deltaMonths > 0 ? "+" : ""}${Math.round(deltaMonths)} months.` : "";
-    text = `Exit WR ${aExitWR.toFixed(1)}% (${aExitZone.label}).${dtText}`;
+
+  if (isAccumulating) {
+    // Employed/Coast/Barista: income is the primary resource, not the portfolio.
+    // Verdict is purely about income coverage and timeline; portfolio WR is informational only.
+    if (aSurplus < 0) {
+      // Spending now exceeds income — requires actual portfolio draws
+      tone = "bad"; headline = "No.";
+      text = `At ${fmtEur(aMonthlyExp)}/mo spending, expenses exceed income — portfolio draws required.`;
+    } else {
+      const recurMonths = Number.isFinite(deltaMonths) ? deltaMonths : Infinity;
+      const ooMonths    = Number.isFinite(oneOffMonths) ? oneOffMonths : Infinity;
+      const totalDelay  = recurMonths + ooMonths;
+
+      if (!Number.isFinite(totalDelay) || totalDelay > 12) {
+        tone = "warn"; headline = "Careful.";
+        const bits = [];
+        if (funDelta !== 0) {
+          bits.push(Number.isFinite(deltaMonths) && deltaMonths > 0
+            ? `+${Math.round(deltaMonths)} months to FIRE`
+            : !Number.isFinite(deltaMonths) ? "timeline becomes open-ended"
+            : `${Math.round(deltaMonths)} months`);
+        }
+        if (oneOff > 0) {
+          bits.push(Number.isFinite(oneOffMonths)
+            ? `one-off 'costs' ${Math.round(oneOffMonths)} months of savings`
+            : "one-off exceeds monthly surplus");
+        }
+        text = bits.join("; ") + ".";
+        if (funDelta !== 0) text += ` Monthly surplus: ${fmtEur(aSurplus)}/mo.`;
+      } else {
+        tone = "good"; headline = "Fine.";
+        const bits = [];
+        if (funDelta !== 0 && Number.isFinite(deltaMonths)) {
+          if (deltaMonths > 0)      bits.push(`+${Math.round(deltaMonths)} months to FIRE`);
+          else if (deltaMonths < 0) bits.push(`saves ${Math.round(-deltaMonths)} months`);
+          else                      bits.push("no timeline change");
+        }
+        if (oneOff > 0 && Number.isFinite(oneOffMonths) && oneOffMonths > 0) {
+          bits.push(`one-off 'costs' ${Math.round(oneOffMonths)} month${oneOffMonths !== 1 ? "s" : ""} of savings`);
+        }
+        if (bits.length === 0) bits.push("no material change");
+        const t = bits.join("; ") + ".";
+        text = t.charAt(0).toUpperCase() + t.slice(1);
+      }
+    }
   } else {
-    tone = "good"; headline = "Fine.";
-    const dtText = Number.isFinite(deltaMonths) && deltaMonths !== 0
-      ? ` FIRE moves ${deltaMonths > 0 ? "+" : ""}${Math.round(deltaMonths)} months.` : " No change to timeline.";
-    text = `Exit WR ${aExitWR.toFixed(1)}% stays in the ${aExitZone.label} zone.${dtText}`;
+    // Drawing phases (lean_fire, full_fire, laid_off): portfolio WR is what matters.
+    if (aExitZone.id === "cut" || aExitZone.id === "elevated") {
+      tone = "bad"; headline = "No.";
+      text = `At ${fmtEur(aMonthlyExp)}/mo, exit WR is ${aExitWR.toFixed(1)}% (${aExitZone.label}) — outside safe-withdrawal range.`;
+    } else if ((Number.isFinite(deltaMonths) && deltaMonths > 12) || zoneWorsened) {
+      tone = "warn"; headline = "Careful.";
+      const dtText = Number.isFinite(deltaMonths) && deltaMonths !== 0
+        ? ` FIRE moves ${deltaMonths > 0 ? "+" : ""}${Math.round(deltaMonths)} months.` : "";
+      text = `Exit WR ${aExitWR.toFixed(1)}% (${aExitZone.label}).${dtText}`;
+    } else {
+      tone = "good"; headline = "Fine.";
+      const dtText = Number.isFinite(deltaMonths) && deltaMonths !== 0
+        ? ` FIRE moves ${deltaMonths > 0 ? "+" : ""}${Math.round(deltaMonths)} months.` : " No change to timeline.";
+      text = `Exit WR ${aExitWR.toFixed(1)}% stays in the ${aExitZone.label} zone.${dtText}`;
+    }
   }
 
-  return { before, after, deltaMonths, oneOffMonths, verdict: { tone, headline, text } };
+  return { before, after, deltaMonths, oneOffMonths, verdict: { tone, headline, text }, isAccumulating };
 }
 
 function buildAIContext(state) {
